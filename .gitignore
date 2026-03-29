@@ -1,0 +1,9 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Dev tooling
+.cursor
+.claude
+claude/*
+.worktrees/
