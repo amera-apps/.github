@@ -1,0 +1,206 @@
+# .github/workflows/dependabot_pr.yml
+#
+# Phases 2 & 3 of the Dependabot lifecycle: PR opened and PR merged.
+# Uses the GHSA ID from fetch-metadata (alert-lookup) to find and update
+# the Slack thread and Linear ticket created by dependabot_alert.
+#
+# Inputs fall back to org-level variables when not provided by the caller.
+
+name: Dependabot PR
+on:
+  workflow_call:
+    inputs:
+      slack-channel-id:
+        required: false
+        type: string
+      linear-team-id:
+        required: false
+        type: string
+    secrets:
+      slack-bot-token:
+        required: false
+      linear-api-key:
+        required: false
+      gh-app-id:
+        required: true
+      gh-app-private-key:
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  triage:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.gh-app-id }}
+          private-key: ${{ secrets.gh-app-private-key }}
+
+      - name: Fetch metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          alert-lookup: true
+
+      # ── PR Opened ─────────────────────────────────────────
+      - name: Enable auto-merge
+        if: >-
+          github.event.action != 'closed'
+          && steps.metadata.outputs.update-type != 'version-update:semver-major'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Label as major
+        if: >-
+          github.event.action != 'closed'
+          && steps.metadata.outputs.update-type == 'version-update:semver-major'
+        run: gh pr edit "$PR_URL" --add-label "major-update"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Find Slack thread by GHSA ID (used by both opened and merged) ──
+      - name: Find Slack thread
+        if: (inputs.slack-channel-id != '' || vars.SLACK_PROJ_COMPLIANCE_CHANNEL_ID != '') && steps.metadata.outputs.ghsa-id != ''
+        id: slack-thread
+        run: |
+          for ATTEMPT in 1 2 3; do
+            RESPONSE=$(curl -s -H "Authorization: Bearer $SLACK_TOKEN" \
+              "https://slack.com/api/conversations.history?channel=$CHANNEL&limit=200")
+
+            TS=$(echo "$RESPONSE" | jq -r --arg ghsa "$GHSA_ID" \
+              '[.messages[] | select(.text | contains($ghsa))] | first | .ts // empty')
+
+            if [ -n "$TS" ]; then
+              echo "thread_ts=$TS" >> "$GITHUB_OUTPUT"
+              echo "Found Slack thread: $TS"
+              exit 0
+            fi
+
+            echo "Attempt $ATTEMPT: thread not found, retrying in $((ATTEMPT * 10))s..."
+            sleep $((ATTEMPT * 10))
+          done
+
+          echo "No matching Slack thread found after 3 attempts"
+        env:
+          SLACK_TOKEN: ${{ secrets.slack-bot-token }}
+          CHANNEL: ${{ inputs.slack-channel-id || vars.SLACK_PROJ_COMPLIANCE_CHANNEL_ID }}
+          GHSA_ID: ${{ steps.metadata.outputs.ghsa-id }}
+
+      # ── Slack: PR opened notification ──────────────────────
+      - name: Slack — PR opened
+        if: >-
+          github.event.action != 'closed'
+          && (inputs.slack-channel-id != '' || vars.SLACK_PROJ_COMPLIANCE_CHANNEL_ID != '')
+        uses: slackapi/slack-github-action@v2
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.slack-bot-token }}
+          arguments: |
+            channel: ${{ inputs.slack-channel-id || vars.SLACK_PROJ_COMPLIANCE_CHANNEL_ID }}
+            thread_ts: ${{ steps.slack-thread.outputs.thread_ts || '' }}
+            text: "📦 Dependabot opened a fix PR: ${{ github.event.pull_request.html_url }}\n`${{ steps.metadata.outputs.dependency-names }}` ${{ steps.metadata.outputs.previous-version }} → ${{ steps.metadata.outputs.new-version }} (${{ steps.metadata.outputs.update-type }})"
+
+      # ── Find and update Linear ticket by GHSA ID ───────────
+      - name: Find Linear ticket
+        if: >-
+          github.event.action != 'closed'
+          && (inputs.linear-team-id != '' || vars.LINEAR_AMERA_TEAM_ID != '')
+          && steps.metadata.outputs.ghsa-id != ''
+        id: linear-ticket
+        run: |
+          RESPONSE=$(curl -s -X POST https://api.linear.app/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $LINEAR_API_KEY" \
+            -d "$(jq -n \
+              --arg ghsa "$GHSA_ID" \
+              --arg team "$LINEAR_TEAM_ID" \
+              '{
+                query: "query($filter: IssueFilterInput) { issues(filter: $filter) { nodes { id identifier url } } }",
+                variables: {
+                  filter: {
+                    team: { id: { eq: $team } },
+                    title: { contains: $ghsa },
+                    state: { type: { neq: "completed" } }
+                  }
+                }
+              }'
+            )")
+
+          ISSUE_ID=$(echo "$RESPONSE" | jq -r '.data.issues.nodes[0].id // empty')
+          IDENTIFIER=$(echo "$RESPONSE" | jq -r '.data.issues.nodes[0].identifier // empty')
+
+          echo "issue_id=$ISSUE_ID" >> "$GITHUB_OUTPUT"
+          echo "identifier=$IDENTIFIER" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$IDENTIFIER" ]; then
+            echo "Found Linear ticket: $IDENTIFIER"
+          else
+            echo "No matching Linear ticket found for $GHSA_ID"
+          fi
+        env:
+          LINEAR_API_KEY: ${{ secrets.linear-api-key }}
+          LINEAR_TEAM_ID: ${{ inputs.linear-team-id || vars.LINEAR_AMERA_TEAM_ID }}
+          GHSA_ID: ${{ steps.metadata.outputs.ghsa-id }}
+
+      - name: Comment on Linear ticket
+        if: >-
+          github.event.action != 'closed'
+          && steps.linear-ticket.outputs.issue_id != ''
+        run: |
+          curl -s -X POST https://api.linear.app/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $LINEAR_API_KEY" \
+            -d "$(jq -n \
+              --arg id "$ISSUE_ID" \
+              --arg body "Dependabot opened a fix PR: $PR_URL\n\n**Update type:** $UPDATE_TYPE\n**Version:** $PREV_VERSION → $NEW_VERSION" \
+              '{
+                query: "mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }",
+                variables: { input: { issueId: $id, body: $body } }
+              }'
+            )"
+        env:
+          LINEAR_API_KEY: ${{ secrets.linear-api-key }}
+          ISSUE_ID: ${{ steps.linear-ticket.outputs.issue_id }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          PREV_VERSION: ${{ steps.metadata.outputs.previous-version }}
+          NEW_VERSION: ${{ steps.metadata.outputs.new-version }}
+
+      - name: Inject Linear ticket into PR body
+        if: >-
+          github.event.action != 'closed'
+          && steps.linear-ticket.outputs.identifier != ''
+        run: |
+          CURRENT_BODY=$(gh pr view "$PR_URL" --json body -q .body)
+          gh pr edit "$PR_URL" --body "${CURRENT_BODY}
+
+Fixes $IDENTIFIER"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IDENTIFIER: ${{ steps.linear-ticket.outputs.identifier }}
+
+      # ── PR Merged ──────────────────────────────────────────
+      - name: Slack — PR merged
+        if: >-
+          github.event.action == 'closed'
+          && github.event.pull_request.merged == true
+          && (inputs.slack-channel-id != '' || vars.SLACK_PROJ_COMPLIANCE_CHANNEL_ID != '')
+        uses: slackapi/slack-github-action@v2
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.slack-bot-token }}
+          arguments: |
+            channel: ${{ inputs.slack-channel-id || vars.SLACK_PROJ_COMPLIANCE_CHANNEL_ID }}
+            thread_ts: ${{ steps.slack-thread.outputs.thread_ts || '' }}
+            text: "✅ Vulnerability resolved. PR merged: ${{ github.event.pull_request.html_url }}\n`${{ steps.metadata.outputs.dependency-names }}` updated from ${{ steps.metadata.outputs.previous-version }} → ${{ steps.metadata.outputs.new-version }}"
