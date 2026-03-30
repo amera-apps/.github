@@ -2,7 +2,7 @@
 
 Organization-level GitHub configuration for Amera, including PR templates, contribution guidelines, and reusable workflows.
 
-## Workflows
+## Dependabot Workflows
 
 Two reusable workflows that together cover the full Dependabot vulnerability lifecycle. They use the **GHSA ID** (GitHub Security Advisory ID) as a shared key to maintain Slack thread continuity and update Linear tickets across events.
 

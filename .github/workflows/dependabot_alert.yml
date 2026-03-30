@@ -62,7 +62,7 @@ jobs:
         with:
           method: chat.postMessage
           token: ${{ secrets.slack-bot-token }}
-          arguments: |
+          payload: |
             channel: ${{ inputs.slack-channel-id || vars.SLACK_PROJ_COMPLIANCE_CHANNEL_ID }}
             text: "🔒 *Dependabot alert* in `${{ steps.alert.outputs.repo }}`\n*Severity:* ${{ steps.alert.outputs.severity }}\n*Package:* `${{ steps.alert.outputs.package }}` (${{ steps.alert.outputs.ecosystem }})\n*CVE:* ${{ steps.alert.outputs.cve }}\n*GHSA:* ${{ steps.alert.outputs.ghsa }}\n*Summary:* ${{ steps.alert.outputs.summary }}\n${{ steps.alert.outputs.url }}"
 

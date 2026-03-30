@@ -105,7 +105,7 @@ jobs:
         with:
           method: chat.postMessage
           token: ${{ secrets.slack-bot-token }}
-          arguments: |
+          payload: |
             channel: ${{ inputs.slack-channel-id || vars.SLACK_PROJ_COMPLIANCE_CHANNEL_ID }}
             thread_ts: ${{ steps.slack-thread.outputs.thread_ts || '' }}
             text: "📦 Dependabot opened a fix PR: ${{ github.event.pull_request.html_url }}\n`${{ steps.metadata.outputs.dependency-names }}` ${{ steps.metadata.outputs.previous-version }} → ${{ steps.metadata.outputs.new-version }} (${{ steps.metadata.outputs.update-type }})"
@@ -183,8 +183,8 @@ jobs:
         run: |
           CURRENT_BODY=$(gh pr view "$PR_URL" --json body -q .body)
           gh pr edit "$PR_URL" --body "${CURRENT_BODY}
-
-Fixes $IDENTIFIER"
+          
+          Fixes ${IDENTIFIER}"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -200,7 +200,7 @@ Fixes $IDENTIFIER"
         with:
           method: chat.postMessage
           token: ${{ secrets.slack-bot-token }}
-          arguments: |
+          payload: |
             channel: ${{ inputs.slack-channel-id || vars.SLACK_PROJ_COMPLIANCE_CHANNEL_ID }}
             thread_ts: ${{ steps.slack-thread.outputs.thread_ts || '' }}
             text: "✅ Vulnerability resolved. PR merged: ${{ github.event.pull_request.html_url }}\n`${{ steps.metadata.outputs.dependency-names }}` updated from ${{ steps.metadata.outputs.previous-version }} → ${{ steps.metadata.outputs.new-version }}"
