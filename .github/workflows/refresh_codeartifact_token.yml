@@ -1,0 +1,63 @@
+# .github/workflows/refresh_codeartifact_token.yml
+#
+# Rotates the AWS CodeArtifact authorization token and stores it as an
+# org-level Dependabot secret. Runs every 10 hours to stay within the
+# 12-hour token lifetime, ensuring Dependabot always has valid credentials
+# when resolving private packages.
+
+name: Refresh CodeArtifact Token
+
+on:
+  schedule:
+    - cron: '0 */10 * * *'
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on:
+      group: aws
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.AMERABOT_APP_ID }}
+          private-key: ${{ secrets.AMERABOT_APP_PRIVATE_KEY }}
+          owner: amera-apps
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Get CodeArtifact token
+        id: ca
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOKEN="$(aws codeartifact get-authorization-token \
+            --domain amera-artifacts \
+            --domain-owner ${{ vars.AWS_OWNER_ID }} \
+            --region "${{ vars.AWS_REGION }}" \
+            --query authorizationToken --output text)"
+          if [[ -z "${TOKEN:-}" || "${TOKEN}" == "None" ]]; then
+            echo "Failed to fetch CodeArtifact token." >&2
+            aws sts get-caller-identity || true
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Update org Dependabot secret
+        shell: bash
+        run: |
+          echo "$CA_TOKEN" | gh secret set CA_TOKEN \
+            --org amera-apps \
+            --app dependabot \
+            --visibility all
+          echo "Dependabot secret CA_TOKEN updated"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CA_TOKEN: ${{ steps.ca.outputs.token }}

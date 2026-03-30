@@ -1,0 +1,225 @@
+# .github/workflows/sync_dependabot_config.yml
+#
+# ❗❗ ONLY works in repos with a pyproject.toml in the root
+#
+# Ensures every org repo with a CodeArtifact-backed pyproject.toml has the
+# correct .github/dependabot.yml. Opens a PR (rather than pushing directly)
+# to comply with branch protection rules requiring review before merge.
+#
+# Posts a Slack summary and creates a Linear ticket listing all PRs opened.
+
+name: Sync Dependabot Config
+
+on:
+  schedule:
+    - cron: '0 11 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.AMERABOT_APP_ID }}
+          private-key: ${{ secrets.AMERABOT_APP_PRIVATE_KEY }}
+          owner: amera-apps
+
+      - name: Sync dependabot config to repos
+        id: sync
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const fs = require('fs')
+            const org = 'amera-apps'
+            const branch = 'chore/sync-dependabot-config'
+            const targetPath = '.github/dependabot.yml'
+            const prTitle = 'chore: sync dependabot config from org template'
+
+            // ── Skip list ────────────────────────────────────────────────────
+            // Add repo names here to exclude them from syncing,
+            // even if they have a CodeArtifact-backed pyproject.toml.
+            const skipRepos = []
+
+            const template = fs.readFileSync('.github/dependabot-template.yml', 'utf8')
+            const templateB64 = Buffer.from(template).toString('base64')
+
+            const repos = await github.paginate(github.rest.repos.listForOrg, {
+              org,
+              type: 'all',
+              per_page: 100
+            })
+
+            const opened = []
+            const skipped = []
+            const upToDate = []
+            const errors = []
+
+            for (const repo of repos) {
+              const name = repo.name
+              if (repo.archived || name === '.github') continue
+              if (skipRepos.includes(name)) {
+                skipped.push(name)
+                continue
+              }
+
+              try {
+                // Check for pyproject.toml with codeartifact source
+                let pyproject
+                try {
+                  const { data } = await github.rest.repos.getContent({
+                    owner: org,
+                    repo: name,
+                    path: 'pyproject.toml'
+                  })
+                  pyproject = Buffer.from(data.content, 'base64').toString('utf8')
+                } catch {
+                  continue
+                }
+
+                if (!pyproject.includes('codeartifact')) continue
+
+                // Check existing dependabot.yml
+                let existingContent = null
+                try {
+                  const { data } = await github.rest.repos.getContent({
+                    owner: org,
+                    repo: name,
+                    path: targetPath
+                  })
+                  existingContent = Buffer.from(data.content, 'base64').toString('utf8')
+                } catch {
+                  // File doesn't exist yet
+                }
+
+                if (existingContent === template) {
+                  upToDate.push(name)
+                  continue
+                }
+
+                // Check for an existing open PR from a previous run
+                const { data: existingPRs } = await github.rest.pulls.list({
+                  owner: org,
+                  repo: name,
+                  head: `${org}:${branch}`,
+                  state: 'open'
+                })
+
+                if (existingPRs.length > 0) {
+                  core.info(`${name}: open sync PR already exists — ${existingPRs[0].html_url}`)
+                  continue
+                }
+
+                // Get default branch SHA to branch from
+                const { data: refData } = await github.rest.git.getRef({
+                  owner: org,
+                  repo: name,
+                  ref: `heads/${repo.default_branch}`
+                })
+
+                // Create or update the sync branch
+                try {
+                  await github.rest.git.updateRef({
+                    owner: org,
+                    repo: name,
+                    ref: `heads/${branch}`,
+                    sha: refData.object.sha,
+                    force: true
+                  })
+                } catch {
+                  await github.rest.git.createRef({
+                    owner: org,
+                    repo: name,
+                    ref: `refs/heads/${branch}`,
+                    sha: refData.object.sha
+                  })
+                }
+
+                // Get existing file SHA on the branch (needed for update)
+                let fileSha = null
+                try {
+                  const { data } = await github.rest.repos.getContent({
+                    owner: org,
+                    repo: name,
+                    path: targetPath,
+                    ref: branch
+                  })
+                  fileSha = data.sha
+                } catch {
+                  // File doesn't exist on this branch yet
+                }
+
+                await github.rest.repos.createOrUpdateFileContents({
+                  owner: org,
+                  repo: name,
+                  path: targetPath,
+                  message: prTitle,
+                  content: templateB64,
+                  branch,
+                  ...(fileSha && { sha: fileSha })
+                })
+
+                const { data: pr } = await github.rest.pulls.create({
+                  owner: org,
+                  repo: name,
+                  title: prTitle,
+                  body: 'Synced from the org-level [`dependabot-template.yml`](https://github.com/amera-apps/.github/blob/main/.github/dependabot-template.yml).\n\nThis configures Dependabot with CodeArtifact registry credentials and enables weekly updates for pip, Docker, and GitHub Actions ecosystems.',
+                  head: branch,
+                  base: repo.default_branch
+                })
+
+                opened.push({ name, url: pr.html_url })
+                core.info(`${name}: opened PR — ${pr.html_url}`)
+              } catch (err) {
+                errors.push({ name, error: err.message })
+                core.warning(`${name}: ${err.message}`)
+              }
+            }
+
+            const summary = { opened, skipped, upToDate, errors }
+            core.setOutput('summary', JSON.stringify(summary))
+            core.setOutput('opened_count', opened.length)
+
+            core.info(`Done. Opened: ${opened.length}, Up-to-date: ${upToDate.length}, Skipped: ${skipped.length}, Errors: ${errors.length}`)
+
+      - name: Post Slack summary
+        if: >-
+          always()
+          && (vars.SLACK_PROJ_COMPLIANCE_CHANNEL_ID != '')
+        uses: slackapi/slack-github-action@v2
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ vars.SLACK_PROJ_COMPLIANCE_CHANNEL_ID }}
+            text: "🔄 *Dependabot config sync* completed.\n${{ fromJSON(steps.sync.outputs.summary).opened.length > 0 && format('*PRs opened:*\n{0}', join(fromJSON(steps.sync.outputs.summary).opened.*.url, '\n')) || 'All repos are up to date — no PRs opened.' }}\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
+
+      - name: Create Linear ticket
+        if: >-
+          always()
+          && fromJSON(steps.sync.outputs.opened_count) > 0
+          && (vars.LINEAR_AMERA_TEAM_ID != '')
+        run: |
+          SUMMARY='${{ steps.sync.outputs.summary }}'
+          PR_LIST=$(echo "$SUMMARY" | jq -r '.opened[] | "- [\(.name)](\(.url))"' )
+
+          curl -s -X POST https://api.linear.app/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $LINEAR_API_KEY" \
+            -d "$(jq -n \
+              --arg title "Dependabot config sync — ${{ fromJSON(steps.sync.outputs.opened_count) }} PRs to review" \
+              --arg desc "The weekly Dependabot config sync opened PRs that need review:\n\n${PR_LIST}\n\nThese PRs sync \`.github/dependabot.yml\` from the [org template](https://github.com/amera-apps/.github/blob/main/.github/dependabot-template.yml)." \
+              --arg team "$LINEAR_TEAM_ID" \
+              --arg project "$LINEAR_PROJECT_ID" \
+              '{ query: "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { url } } }", variables: { input: { title: $title, description: $desc, teamId: $team, projectId: $project } } }'
+            )"
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          LINEAR_TEAM_ID: ${{ vars.LINEAR_AMERA_TEAM_ID }}
+          LINEAR_PROJECT_ID: ${{ vars.LINEAR_SOC2_COMPLIANCE_PROJECT_ID }}

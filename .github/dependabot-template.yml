@@ -1,0 +1,30 @@
+# Dependabot configuration synced from amera-apps/.github.
+# Do not edit in individual repos — changes will be overwritten
+# by the sync_dependabot_config workflow.
+
+version: 2
+
+registries:
+  codeartifact:
+    type: python-index
+    url: https://amera-artifacts-371568547021.d.codeartifact.us-east-1.amazonaws.com/pypi/amera-python/simple/
+    username: aws
+    password: ${{ secrets.CA_TOKEN }}
+
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    registries:
+      - codeartifact
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
