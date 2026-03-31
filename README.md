@@ -1,51 +1,58 @@
 # .github
 
-Organization-level GitHub configuration for Amera, including PR templates, contribution guidelines, and reusable workflows.
+Organization-level GitHub configuration for Amera, including PR templates, reusable workflows, and the Dependabot webhook worker.
 
-## Dependabot Workflows
+## Dependabot Automation
 
-Four workflows that cover the full Dependabot vulnerability lifecycle plus the infrastructure that keeps it working with private CodeArtifact packages.
+Automated vulnerability lifecycle management across all org repos, combining a Cloudflare Worker for real-time event handling with GitHub Actions workflows for infrastructure maintenance.
 
 **Overview**
 ```mermaid
 graph TD
-    subgraph infra [Infrastructure]
+    subgraph webhook ["Org Webhook → CF Worker"]
+        GH["GitHub Events"] --> Worker["dependabot-webhook\n(Cloudflare Worker)"]
+        Worker -->|"dependabot_alert.created"| AlertHandler[Alert Handler]
+        Worker -->|"pull_request.opened"| PRHandler[PR Handler]
+        Worker -->|"pull_request.closed+merged"| MergeHandler[Merge Handler]
+    end
+
+    subgraph actions ["Slack + Linear + GitHub API"]
+        AlertHandler -->|"post"| Slack["Slack\n(GHSA-keyed thread)"]
+        AlertHandler -->|"create ticket"| Linear["Linear\n(GHSA in title)"]
+        PRHandler -->|"reply in thread"| Slack
+        PRHandler -->|"comment on ticket"| Linear
+        PRHandler -->|"auto-merge / label"| GitHubAPI[GitHub API]
+        MergeHandler -->|"reply: resolved"| Slack
+    end
+
+    subgraph infra [Infrastructure Workflows]
         Refresh["refresh_codeartifact_token\n(every 10h)"] -->|"rotates"| CASecret["Org Dependabot secret:\nCA_TOKEN"]
-        Sync["sync_dependabot_config\n(weekly)"] -->|"opens PRs"| DYml["dependabot.yml\n(per repo)"]
-        Sync -->|"reads"| Template["dependabot-template.yml"]
+        Sync["sync_dependabot_config\n(daily)"] -->|"opens PRs"| DYml["dependabot.yml\n(per repo)"]
     end
-
-    subgraph lifecycle [Vulnerability Lifecycle]
-        V[Vulnerability Detected] --> A[dependabot_alert]
-        A -->|"Slack + Linear ticket"| Team[Team Notified]
-        D[Dependabot Opens PR] --> P[dependabot_pr]
-        P -->|"patch/minor"| AutoMerge["Auto-merge enabled\n(awaits human approval)"]
-        P -->|"major"| ManualReview["Label + Slack + Linear ticket"]
-    end
-
-    DYml -->|"uses"| CASecret
 ```
 
 **Vulnerability lifecycle (detailed)**
 ```mermaid
 graph TD
     subgraph alert_phase [1 - Alert Created]
-        A1[dependabot_alert] --> A2["Post Slack message\n(includes GHSA ID)"]
+        A1["dependabot_alert webhook"] --> A2["Post Slack message\n(includes GHSA ID)"]
         A1 --> A3["Create Linear ticket\n(GHSA ID in title)"]
     end
 
     subgraph pr_opened [2 - PR Opened]
-        B1["dependabot_pr\n(opened)"] --> B2["fetch-metadata\n(alert-lookup: true)"]
-        B2 --> B3[Get ghsa-id]
-        B3 --> B4["Find Slack thread by GHSA ID\n(retry with backoff)"]
-        B4 --> B5[Reply in thread]
-        B3 --> B6[Find Linear ticket by GHSA ID]
-        B6 --> B7[Comment on ticket]
-        B6 --> B8["Inject 'Fixes AMR-123'\ninto PR body"]
+        B1["pull_request webhook\n(sender: dependabot)"] --> B2["Look up GHSA ID\n(via Dependabot alerts API)"]
+        B2 --> B3["Find Slack thread by GHSA ID"]
+        B3 --> B4[Reply in thread]
+        B2 --> B5[Find Linear ticket by GHSA ID]
+        B5 --> B6[Comment on ticket]
+        B5 --> B7["Inject 'Fixes AMR-123'\ninto PR body"]
+        B1 --> B8{"Update type?"}
+        B8 -->|"patch/minor"| B9[Enable auto-merge]
+        B8 -->|"major"| B10["Add 'major-update' label"]
     end
 
     subgraph pr_merged [3 - PR Merged]
-        C1["dependabot_pr\n(closed+merged)"] --> C2[Reply in Slack thread: resolved]
+        C1["pull_request webhook\n(closed+merged)"] --> C2[Reply in Slack thread: resolved]
         C1 --> C3["Linear auto-closes ticket\n(via PR body keyword)"]
     end
 
@@ -55,24 +62,49 @@ graph TD
 
 ### Prerequisites
 
-**GitHub App (AMERABOT)** — used by all workflows for elevated permissions.
+**GitHub App (AMERABOT)** — used by the Worker for GitHub API calls (auto-merge, labels, alert lookup, PR edits) and by workflows for elevated permissions.
 
 1. Create a GitHub App in the `amera-apps` org with these permissions:
-   - **Dependabot alerts:** Read-only (for `alert-lookup` in `fetch-metadata`)
+   - **Dependabot alerts:** Read-only
    - **Organization Dependabot secrets:** Read and write (for `refresh_codeartifact_token`)
-   - **Contents:** Read and write (for `sync_dependabot_config` to create branches and commit files)
-   - **Pull requests:** Read and write (for `sync_dependabot_config` to open PRs)
+   - **Contents:** Read and write (for `sync_dependabot_config`)
+   - **Pull requests:** Read and write (for `sync_dependabot_config` and the Worker)
 2. Install it on all repos
-3. Store as org-level secrets: `AMERABOT_APP_ID` and `AMERABOT_APP_PRIVATE_KEY`
+3. Note the **installation ID** from `https://github.com/organizations/amera-apps/settings/installations`
 
-**Slack bot scopes** — the bot needs `chat:write` (already required) plus `channels:history` (public channels) or `groups:history` (private channels) for thread lookup.
+**Org webhook** — delivers `dependabot_alert` and `pull_request` events to the Worker.
 
-**Org secrets** — sensitive credentials, set at the org level so all repos inherit them:
+1. Go to org Settings → Webhooks → Add webhook
+2. Payload URL: `https://dependabot-webhook.<subdomain>.workers.dev`
+3. Content type: `application/json`
+4. Secret: a strong random string (same value stored as `GITHUB_WEBHOOK_SECRET` in the Worker)
+5. Events: select **Dependabot alerts** and **Pull requests**
+
+**Slack bot scopes** — `chat:write` plus `channels:history` (public) or `groups:history` (private) for thread lookup.
+
+**Worker secrets** — set via `wrangler secret put` in `workers/dependabot/`:
 
 | Secret | Description |
 |---|---|
-| `SLACK_BOT_TOKEN` | Slack bot token (`chat:write` + `channels:history` scopes) |
-| `LINEAR_API_KEY` | Linear API key for ticket creation and search |
+| `GITHUB_WEBHOOK_SECRET` | Shared secret for webhook signature verification |
+| `GITHUB_APP_ID` | AMERABOT app ID |
+| `GITHUB_APP_PRIVATE_KEY` | AMERABOT private key (PEM format) |
+| `GITHUB_INSTALLATION_ID` | AMERABOT installation ID (numeric) |
+| `SLACK_BOT_TOKEN` | Slack bot token |
+| `LINEAR_API_KEY` | Linear API key |
+
+**Worker variables** — set in [`workers/dependabot/wrangler.toml`](workers/dependabot/wrangler.toml) under `[vars]`:
+
+| Variable | Description |
+|---|---|
+| `SLACK_CHANNEL_ID` | Slack channel for Dependabot notifications |
+| `LINEAR_TEAM_ID` | Linear team for vulnerability tickets |
+| `LINEAR_PROJECT_ID` | Linear project for vulnerability tickets |
+
+**Org secrets** (for GitHub Actions workflows only):
+
+| Secret | Description |
+|---|---|
 | `AMERABOT_APP_ID` | GitHub App ID |
 | `AMERABOT_APP_PRIVATE_KEY` | GitHub App private key |
 | `AWS_ACCESS_KEY_ID` | IAM user for CodeArtifact token generation |
@@ -80,121 +112,53 @@ graph TD
 
 The AWS IAM user should have minimal permissions: `codeartifact:GetAuthorizationToken` and `sts:GetServiceLinkedRoleDeletionStatus`.
 
-**Org variables** — non-sensitive defaults. All workflow inputs fall back to these when not explicitly provided by the caller, so most repos don't need to pass them.
+**Org variables** (for GitHub Actions workflows only):
 
 | Variable | Description |
 |---|---|
-| `SLACK_PROJ_COMPLIANCE_CHANNEL_ID` | Default Slack channel for Dependabot notifications |
-| `LINEAR_AMERA_TEAM_ID` | Default Linear team for vulnerability tickets |
-| `LINEAR_SOC2_COMPLIANCE_PROJECT_ID` | Default Linear project for vulnerability tickets |
+| `SLACK_PROJ_COMPLIANCE_CHANNEL_ID` | Slack channel (used by `sync_dependabot_config`) |
+| `LINEAR_AMERA_TEAM_ID` | Linear team (used by `sync_dependabot_config`) |
+| `LINEAR_SOC2_COMPLIANCE_PROJECT_ID` | Linear project (used by `sync_dependabot_config`) |
 | `AWS_REGION` | AWS region for CodeArtifact (`us-east-1`) |
-| `AWS_OWNER_ID` | AWS account ID / domain owner for CodeArtifact (`371568547021`) |
+| `AWS_OWNER_ID` | AWS account ID / domain owner (`371568547021`) |
 
-Repos can override any default by passing the corresponding input in the caller workflow.
+### Dependabot Webhook Worker
 
-### Dependabot Alert
+[`workers/dependabot/`](workers/dependabot/)
 
-[`.github/workflows/dependabot_alert.yml`](.github/workflows/dependabot_alert.yml)
+A Cloudflare Worker that receives GitHub org-level webhooks and handles the full Dependabot vulnerability lifecycle in real-time. No per-repo workflow callers needed.
 
-**Phase 1:** Fires when a vulnerability alert is created. Posts a Slack message and creates a Linear ticket, both containing the GHSA ID so downstream workflows can find them.
+**Events handled:**
 
-| Input | Required | Fallback variable | Description |
-|---|---|---|---|
-| `slack-channel-id` | No | `SLACK_PROJ_COMPLIANCE_CHANNEL_ID` | Slack channel ID |
-| `linear-team-id` | No | `LINEAR_AMERA_TEAM_ID` | Linear team ID |
-| `linear-project-id` | No | `LINEAR_SOC2_COMPLIANCE_PROJECT_ID` | Linear project ID |
-
-| Secret | Required | Description |
+| Event | Action | What happens |
 |---|---|---|
-| `slack-bot-token` | No | Slack bot token |
-| `linear-api-key` | No | Linear API key |
+| `dependabot_alert` | `created` | Posts Slack message + creates Linear ticket (both keyed by GHSA ID) |
+| `pull_request` | `opened` (by Dependabot) | Enables auto-merge (patch/minor) or labels as major, replies in Slack thread, comments on Linear ticket, injects `Fixes AMR-123` into PR body |
+| `pull_request` | `closed` + merged (by Dependabot) | Replies in Slack thread confirming resolution |
 
-#### Usage
+All other events are acknowledged with 200 OK and ignored.
 
-Minimal — uses org variable defaults:
+#### Development
 
-```yaml
-# .github/workflows/dependabot_alert.yml
-name: Dependabot Alert
-on:
-  dependabot_alert:
-    types: [created]
-
-jobs:
-  notify:
-    uses: amera-apps/.github/.github/workflows/dependabot_alert.yml@main
-    secrets:
-      slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
-      linear-api-key: ${{ secrets.LINEAR_API_KEY }}
+```bash
+cd workers/dependabot
+npm install
+wrangler dev
 ```
 
-With overrides:
+#### Deployment
 
-```yaml
-jobs:
-  notify:
-    uses: amera-apps/.github/.github/workflows/dependabot_alert.yml@main
-    with:
-      slack-channel-id: C9999999999
-      linear-team-id: different-team-id
-      linear-project-id: different-project-id
-    secrets:
-      slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
-      linear-api-key: ${{ secrets.LINEAR_API_KEY }}
-```
+```bash
+cd workers/dependabot
+wrangler deploy
 
-### Dependabot PR
-
-[`.github/workflows/dependabot_pr.yml`](.github/workflows/dependabot_pr.yml)
-
-**Phases 2 & 3:** Handles PR opened and PR merged events.
-
-**On PR opened:**
-
-- Enables auto-merge for patch/minor updates (waits for human approval + CI)
-- Labels major updates with `major-update`
-- Finds the Slack thread by GHSA ID (with retry + backoff) and replies in-thread
-- Finds the Linear ticket by GHSA ID, adds a comment, and injects `Fixes AMR-123` into the PR body
-
-**On PR merged:**
-
-- Replies in the Slack thread confirming the vulnerability is resolved
-- Linear auto-closes the ticket via the `Fixes AMR-123` keyword in the PR body
-
-| Input | Required | Fallback variable | Description |
-|---|---|---|---|
-| `slack-channel-id` | No | `SLACK_PROJ_COMPLIANCE_CHANNEL_ID` | Slack channel ID |
-| `linear-team-id` | No | `LINEAR_AMERA_TEAM_ID` | Linear team ID |
-
-| Secret | Required | Description |
-|---|---|---|
-| `slack-bot-token` | No | Slack bot token |
-| `linear-api-key` | No | Linear API key |
-| `gh-app-id` | Yes | GitHub App ID for alert-lookup |
-| `gh-app-private-key` | Yes | GitHub App private key |
-
-#### Usage
-
-Minimal — uses org variable defaults:
-
-```yaml
-# .github/workflows/dependabot_pr.yml
-name: Dependabot PR
-on:
-  pull_request:
-    types: [opened, closed]
-
-jobs:
-  triage:
-    uses: amera-apps/.github/.github/workflows/dependabot_pr.yml@main
-    permissions:
-      contents: write
-      pull-requests: write
-    secrets:
-      slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
-      linear-api-key: ${{ secrets.LINEAR_API_KEY }}
-      gh-app-id: ${{ secrets.AMERABOT_APP_ID }}
-      gh-app-private-key: ${{ secrets.AMERABOT_APP_PRIVATE_KEY }}
+# Set secrets (one-time, or when rotating)
+wrangler secret put GITHUB_WEBHOOK_SECRET
+wrangler secret put GITHUB_APP_ID
+wrangler secret put GITHUB_APP_PRIVATE_KEY
+wrangler secret put GITHUB_INSTALLATION_ID
+wrangler secret put SLACK_BOT_TOKEN
+wrangler secret put LINEAR_API_KEY
 ```
 
 ### CodeArtifact Token Refresh
@@ -224,7 +188,7 @@ Dependabot requires a `.github/dependabot.yml` in each repo — there's no way t
 
 ```mermaid
 graph TD
-    Cron["Schedule\n(Monday 9am UTC)"] --> Sync[sync_dependabot_config]
+    Cron["Schedule\n(daily 11:00 UTC)"] --> Sync[sync_dependabot_config]
     Sync -->|"reads"| Template["dependabot-template.yml\n(this repo)"]
     Sync -->|"for each repo"| Check{"Has pyproject.toml\nwith codeartifact?"}
     Check -->|"yes + out of date"| PR["Open PR:\nchore/sync-dependabot-config"]
@@ -260,5 +224,5 @@ To change the Dependabot config across all repos:
 
 1. Edit [`.github/dependabot-template.yml`](.github/dependabot-template.yml) in this repo
 2. Merge to `main`
-3. Wait for the next scheduled sync (Monday 9am UTC) or trigger manually via `workflow_dispatch`
+3. Wait for the next scheduled sync or trigger manually via `workflow_dispatch`
 4. Review and merge the PRs opened in each repo
