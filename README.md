@@ -1,19 +1,19 @@
 # .github
 
-Organization-level GitHub configuration for Amera, including PR templates, reusable workflows, and the Dependabot webhook worker.
+Organization-level GitHub configuration for Amera, including PR templates, reusable workflows, and Dependabot automation.
 
 ## Dependabot Automation
 
-Automated vulnerability lifecycle management across all org repos, combining a Cloudflare Worker for real-time event handling with GitHub Actions workflows for infrastructure maintenance.
+Automated vulnerability lifecycle management across all org repos, combining an [AWS Lambda webhook handler](https://github.com/amera-apps/infra/tree/main/aws/lambda/dependabot) for real-time event handling with GitHub Actions workflows for infrastructure maintenance.
 
 **Overview**
 ```mermaid
 graph TD
-    subgraph webhook ["Org Webhook → CF Worker"]
-        GH["GitHub Events"] --> Worker["dependabot-webhook\n(Cloudflare Worker)"]
-        Worker -->|"dependabot_alert.created"| AlertHandler[Alert Handler]
-        Worker -->|"pull_request.opened"| PRHandler[PR Handler]
-        Worker -->|"pull_request.closed+merged"| MergeHandler[Merge Handler]
+    subgraph webhook ["Org Webhook → AWS Lambda"]
+        GH["GitHub Events"] --> Lambda["dependabot-webhook\n(AWS Lambda)"]
+        Lambda -->|"dependabot_alert.created"| AlertHandler[Alert Handler]
+        Lambda -->|"pull_request.opened"| PRHandler[PR Handler]
+        Lambda -->|"pull_request.closed+merged"| MergeHandler[Merge Handler]
     end
 
     subgraph actions ["Slack + Linear + GitHub API"]
@@ -62,44 +62,25 @@ graph TD
 
 ### Prerequisites
 
-**GitHub App (AMERABOT)** — used by the Worker for GitHub API calls (auto-merge, labels, alert lookup, PR edits) and by workflows for elevated permissions.
+**GitHub App (AMERABOT)** — used by the Lambda for GitHub API calls (auto-merge, labels, alert lookup, PR edits) and by workflows for elevated permissions.
 
 1. Create a GitHub App in the `amera-apps` org with these permissions:
    - **Dependabot alerts:** Read-only
    - **Organization Dependabot secrets:** Read and write (for `refresh_codeartifact_token`)
    - **Contents:** Read and write (for `sync_dependabot_config`)
-   - **Pull requests:** Read and write (for `sync_dependabot_config` and the Worker)
+   - **Pull requests:** Read and write (for `sync_dependabot_config` and the Lambda)
 2. Install it on all repos
 3. Note the **installation ID** from `https://github.com/organizations/amera-apps/settings/installations`
 
-**Org webhook** — delivers `dependabot_alert` and `pull_request` events to the Worker.
+**Org webhook** — delivers `dependabot_alert` and `pull_request` events to the Lambda.
 
 1. Go to org Settings → Webhooks → Add webhook
-2. Payload URL: `https://dependabot-webhook.<subdomain>.workers.dev`
+2. Payload URL: the Lambda's function URL or API Gateway endpoint
 3. Content type: `application/json`
-4. Secret: a strong random string (same value stored as `GITHUB_WEBHOOK_SECRET` in the Worker)
+4. Secret: a strong random string (same value stored as `GITHUB_WEBHOOK_SECRET` in the Lambda)
 5. Events: select **Dependabot alerts** and **Pull requests**
 
 **Slack bot scopes** — `chat:write` plus `channels:history` (public) or `groups:history` (private) for thread lookup.
-
-**Worker secrets** — set via `wrangler secret put` in `workers/dependabot/`:
-
-| Secret | Description |
-|---|---|
-| `GITHUB_WEBHOOK_SECRET` | Shared secret for webhook signature verification |
-| `GITHUB_APP_ID` | AMERABOT app ID |
-| `GITHUB_APP_PRIVATE_KEY` | AMERABOT private key (PEM format) |
-| `GITHUB_INSTALLATION_ID` | AMERABOT installation ID (numeric) |
-| `SLACK_BOT_TOKEN` | Slack bot token |
-| `LINEAR_API_KEY` | Linear API key |
-
-**Worker variables** — set in [`workers/dependabot/wrangler.toml`](workers/dependabot/wrangler.toml) under `[vars]`:
-
-| Variable | Description |
-|---|---|
-| `SLACK_CHANNEL_ID` | Slack channel for Dependabot notifications |
-| `LINEAR_TEAM_ID` | Linear team for vulnerability tickets |
-| `LINEAR_PROJECT_ID` | Linear project for vulnerability tickets |
 
 **Org secrets** (for GitHub Actions workflows only):
 
@@ -122,44 +103,9 @@ The AWS IAM user should have minimal permissions: `codeartifact:GetAuthorization
 | `AWS_REGION` | AWS region for CodeArtifact (`us-east-1`) |
 | `AWS_OWNER_ID` | AWS account ID / domain owner (`371568547021`) |
 
-### Dependabot Webhook Worker
+### Dependabot Webhook Handler
 
-[`workers/dependabot/`](workers/dependabot/)
-
-A Cloudflare Worker that receives GitHub org-level webhooks and handles the full Dependabot vulnerability lifecycle in real-time. No per-repo workflow callers needed.
-
-**Events handled:**
-
-| Event | Action | What happens |
-|---|---|---|
-| `dependabot_alert` | `created` | Posts Slack message + creates Linear ticket (both keyed by GHSA ID) |
-| `pull_request` | `opened` (by Dependabot) | Enables auto-merge (patch/minor) or labels as major, replies in Slack thread, comments on Linear ticket, injects `Fixes AMR-123` into PR body |
-| `pull_request` | `closed` + merged (by Dependabot) | Replies in Slack thread confirming resolution |
-
-All other events are acknowledged with 200 OK and ignored.
-
-#### Development
-
-```bash
-cd workers/dependabot
-npm install
-wrangler dev
-```
-
-#### Deployment
-
-```bash
-cd workers/dependabot
-wrangler deploy
-
-# Set secrets (one-time, or when rotating)
-wrangler secret put GITHUB_WEBHOOK_SECRET
-wrangler secret put GITHUB_APP_ID
-wrangler secret put GITHUB_APP_PRIVATE_KEY
-wrangler secret put GITHUB_INSTALLATION_ID
-wrangler secret put SLACK_BOT_TOKEN
-wrangler secret put LINEAR_API_KEY
-```
+The webhook handler is deployed as an AWS Lambda. Source, configuration, and deployment instructions live in [`infra/aws/lambda/dependabot/`](https://github.com/amera-apps/infra/tree/main/aws/lambda/dependabot).
 
 ### CodeArtifact Token Refresh
 
