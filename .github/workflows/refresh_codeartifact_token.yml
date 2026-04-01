@@ -14,19 +14,18 @@ on:
 
 jobs:
   refresh:
-    runs-on:
-      group: aws
+    runs-on: ubuntu-latest
     steps:
       - name: Generate GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.AMERABOT_APP_ID }}
           private-key: ${{ secrets.AMERABOT_APP_PRIVATE_KEY }}
           owner: amera-apps
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

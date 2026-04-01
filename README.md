@@ -27,7 +27,7 @@ graph TD
 
     subgraph infra [Infrastructure Workflows]
         Refresh["refresh_codeartifact_token\n(every 10h)"] -->|"rotates"| CASecret["Org Dependabot secret:\nCA_TOKEN"]
-        Sync["sync_dependabot_config\n(daily)"] -->|"opens PRs"| DYml["dependabot.yml\n(per repo)"]
+        Sync["sync_dependabot_python\n(daily)"] -->|"opens PRs"| DYml["dependabot.yml\n(per repo)"]
     end
 ```
 
@@ -67,8 +67,8 @@ graph TD
 1. Create a GitHub App in the `amera-apps` org with these permissions:
    - **Dependabot alerts:** Read-only
    - **Organization Dependabot secrets:** Read and write (for `refresh_codeartifact_token`)
-   - **Contents:** Read and write (for `sync_dependabot_config`)
-   - **Pull requests:** Read and write (for `sync_dependabot_config` and the Lambda)
+   - **Contents:** Read and write (for `sync_dependabot_python`)
+   - **Pull requests:** Read and write (for `sync_dependabot_python` and the Lambda)
 2. Install it on all repos
 3. Note the **installation ID** from `https://github.com/organizations/amera-apps/settings/installations`
 
@@ -97,9 +97,10 @@ The AWS IAM user should have minimal permissions: `codeartifact:GetAuthorization
 
 | Variable | Description |
 |---|---|
-| `SLACK_DEPENDABOT_ALERTS_CHANNEL_ID` | Slack channel (used by `sync_dependabot_config`) |
-| `LINEAR_AMERA_TEAM_ID` | Linear team (used by `sync_dependabot_config`) |
-| `LINEAR_DEPENDABOT_ALERTS_PROJECT_ID` | Linear project (used by `sync_dependabot_config`) |
+| `SLACK_DEPENDABOT_ALERTS_CHANNEL_ID` | Slack channel (used by `sync_dependabot_python`) |
+| `LINEAR_AMERA_TEAM_ID` | Linear team (used by `sync_dependabot_python`) |
+| `LINEAR_DEPENDABOT_ALERTS_PROJECT_ID` | Linear project (used by `sync_dependabot_python`) |
+| `LINEAR_TRIAGE_STATE_ID` | Linear "Triage" workflow state — tickets land here for immediate visibility |
 | `AWS_REGION` | AWS region for CodeArtifact (`us-east-1`) |
 | `AWS_OWNER_ID` | AWS account ID / domain owner (`371568547021`) |
 
@@ -126,37 +127,37 @@ Runs on the `aws` self-hosted runner group (AWS CLI is pre-installed). Uses `gh 
 
 The workflow also supports `workflow_dispatch` for manual runs if a token needs immediate rotation.
 
-### Dependabot Config Sync
+### Dependabot Config Sync (Python)
 
-[`.github/workflows/sync_dependabot_config.yml`](.github/workflows/sync_dependabot_config.yml)
+[`.github/workflows/sync_dependabot_python.yml`](.github/workflows/sync_dependabot_python.yml)
 
-Dependabot requires a `.github/dependabot.yml` in each repo — there's no way to inherit it at the org level. This workflow maintains a single template ([`.github/dependabot-template.yml`](.github/dependabot-template.yml)) and syncs it to all repos that need it.
+Dependabot requires a `.github/dependabot.yml` in each repo — there's no way to inherit it at the org level. This workflow maintains a single template ([`.github/dependabot-python-template.yml`](.github/dependabot-python-template.yml)) and syncs it to all Python repos (any repo with a `pyproject.toml` in the root).
 
 ```mermaid
 graph TD
-    Cron["Schedule\n(daily 11:00 UTC)"] --> Sync[sync_dependabot_config]
-    Sync -->|"reads"| Template["dependabot-template.yml\n(this repo)"]
-    Sync -->|"for each repo"| Check{"Has pyproject.toml\nwith codeartifact?"}
+    Cron["Schedule\n(daily 11:00 UTC)"] --> Sync[sync_dependabot_python]
+    Sync -->|"reads"| Template["dependabot-python-template.yml\n(this repo)"]
+    Sync -->|"for each repo"| Check{"Has pyproject.toml?"}
     Check -->|"yes + out of date"| PR["Open PR:\nchore/sync-dependabot-config"]
     Check -->|"no or up-to-date"| Skip[Skip]
     PR --> Slack["Slack summary"]
-    PR --> Linear["Linear ticket\n(if PRs opened)"]
+    PR --> Linear["Linear ticket per repo\n(Triage)"]
 ```
 
 **How it works:**
 
 1. Lists all repos in the org
-2. For each non-archived repo, checks if `pyproject.toml` exists and references `codeartifact`
+2. For each non-archived repo, checks if `pyproject.toml` exists
 3. Compares the repo's `.github/dependabot.yml` to the template — skips if already matching
 4. Skips if an open sync PR already exists from a previous run
 5. Creates a branch, commits the template, and opens a PR
-6. After processing all repos, posts a Slack summary and creates a Linear ticket listing the PRs
+6. After processing all repos, posts a Slack summary and creates one Linear ticket per repo (in Triage) for each PR opened
 
 PRs are opened (not direct pushes) to comply with branch protection rules requiring at least one approving review.
 
 #### Skipping repos
 
-Some repos may need a custom `dependabot.yml` or should be excluded entirely. Add them to the `skipRepos` array at the top of the `actions/github-script` block in `sync_dependabot_config.yml`:
+Some repos may need a custom `dependabot.yml` or should be excluded entirely. Add them to the `skipRepos` array at the top of the `actions/github-script` block in `sync_dependabot_python.yml`:
 
 ```javascript
 const skipRepos = ['some-special-repo', 'another-exception']
@@ -168,7 +169,7 @@ Skipped repos appear in the workflow run log for auditability.
 
 To change the Dependabot config across all repos:
 
-1. Edit [`.github/dependabot-template.yml`](.github/dependabot-template.yml) in this repo
+1. Edit [`.github/dependabot-python-template.yml`](.github/dependabot-python-template.yml) in this repo
 2. Merge to `main`
 3. Wait for the next scheduled sync or trigger manually via `workflow_dispatch`
 4. Review and merge the PRs opened in each repo
