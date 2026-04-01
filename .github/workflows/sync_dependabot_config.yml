@@ -1,10 +1,8 @@
 # .github/workflows/sync_dependabot_config.yml
 #
-# ❗❗ ONLY works in repos with a pyproject.toml in the root
-#
-# Ensures every org repo with a CodeArtifact-backed pyproject.toml has the
-# correct .github/dependabot.yml. Opens a PR (rather than pushing directly)
-# to comply with branch protection rules requiring review before merge.
+# Ensures every org repo with a pyproject.toml in the root has the correct
+# .github/dependabot.yml. Opens a PR (rather than pushing directly) to
+# comply with branch protection rules requiring review before merge.
 #
 # Posts a Slack summary and creates a Linear ticket listing all PRs opened.
 
@@ -72,7 +70,7 @@ jobs:
               }
 
               try {
-                // Check for pyproject.toml with codeartifact source
+                // Check for pyproject.toml
                 let pyproject
                 try {
                   const { data } = await github.rest.repos.getContent({
@@ -84,8 +82,6 @@ jobs:
                 } catch {
                   continue
                 }
-
-                if (!pyproject.includes('codeartifact')) continue
 
                 // Check existing dependabot.yml
                 let existingContent = null
