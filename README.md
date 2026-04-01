@@ -97,9 +97,9 @@ The AWS IAM user should have minimal permissions: `codeartifact:GetAuthorization
 
 | Variable | Description |
 |---|---|
-| `SLACK_PROJ_COMPLIANCE_CHANNEL_ID` | Slack channel (used by `sync_dependabot_config`) |
+| `SLACK_DEPENDABOT_ALERTS_CHANNEL_ID` | Slack channel (used by `sync_dependabot_config`) |
 | `LINEAR_AMERA_TEAM_ID` | Linear team (used by `sync_dependabot_config`) |
-| `LINEAR_SOC2_COMPLIANCE_PROJECT_ID` | Linear project (used by `sync_dependabot_config`) |
+| `LINEAR_DEPENDABOT_ALERTS_PROJECT_ID` | Linear project (used by `sync_dependabot_config`) |
 | `AWS_REGION` | AWS region for CodeArtifact (`us-east-1`) |
 | `AWS_OWNER_ID` | AWS account ID / domain owner (`371568547021`) |
 

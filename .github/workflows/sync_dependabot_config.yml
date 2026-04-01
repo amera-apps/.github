@@ -191,13 +191,13 @@ jobs:
       - name: Post Slack summary
         if: >-
           always()
-          && (vars.SLACK_PROJ_COMPLIANCE_CHANNEL_ID != '')
+          && (vars.SLACK_DEPENDABOT_ALERTS_CHANNEL_ID != '')
         uses: slackapi/slack-github-action@v2
         with:
           method: chat.postMessage
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
-            channel: ${{ vars.SLACK_PROJ_COMPLIANCE_CHANNEL_ID }}
+            channel: ${{ vars.SLACK_DEPENDABOT_ALERTS_CHANNEL_ID }}
             text: "🔄 *Dependabot config sync* completed.\n${{ fromJSON(steps.sync.outputs.summary).opened.length > 0 && format('*PRs opened:*\n{0}', join(fromJSON(steps.sync.outputs.summary).opened.*.url, '\n')) || 'All repos are up to date — no PRs opened.' }}\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
 
       - name: Create Linear ticket
@@ -222,4 +222,4 @@ jobs:
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           LINEAR_TEAM_ID: ${{ vars.LINEAR_AMERA_TEAM_ID }}
-          LINEAR_PROJECT_ID: ${{ vars.LINEAR_SOC2_COMPLIANCE_PROJECT_ID }}
+          LINEAR_PROJECT_ID: ${{ vars.LINEAR_DEPENDABOT_ALERTS_PROJECT_ID }}
