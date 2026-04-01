@@ -207,6 +207,7 @@ jobs:
           SUMMARY='${{ steps.sync.outputs.summary }}'
           PR_LIST=$(echo "$SUMMARY" | jq -r '.opened[] | "- [\(.name)](\(.url))"' )
 
+          # Lands in Triage so the ticket is immediately visible for review
           curl -s -X POST https://api.linear.app/graphql \
             -H "Content-Type: application/json" \
             -H "Authorization: $LINEAR_API_KEY" \
@@ -215,9 +216,11 @@ jobs:
               --arg desc "The weekly Dependabot config sync opened PRs that need review:\n\n${PR_LIST}\n\nThese PRs sync \`.github/dependabot.yml\` from the [org template](https://github.com/amera-apps/.github/blob/main/.github/dependabot-python-template.yml)." \
               --arg team "$LINEAR_TEAM_ID" \
               --arg project "$LINEAR_PROJECT_ID" \
-              '{ query: "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { url } } }", variables: { input: { title: $title, description: $desc, teamId: $team, projectId: $project } } }'
+              --arg state "$LINEAR_TRIAGE_STATE_ID" \
+              '{ query: "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { url } } }", variables: { input: { title: $title, description: $desc, teamId: $team, projectId: $project, stateId: $state } } }'
             )"
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           LINEAR_TEAM_ID: ${{ vars.LINEAR_AMERA_TEAM_ID }}
           LINEAR_PROJECT_ID: ${{ vars.LINEAR_DEPENDABOT_ALERTS_PROJECT_ID }}
+          LINEAR_TRIAGE_STATE_ID: ${{ vars.LINEAR_TRIAGE_STATE_ID }}
