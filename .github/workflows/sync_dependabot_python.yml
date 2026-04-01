@@ -210,12 +210,14 @@ jobs:
             REPO=$(echo "$item" | jq -r '.name')
             PR_URL=$(echo "$item" | jq -r '.url')
 
+            DESC=$(printf "The daily [dependabot config sync](https://github.com/amera-apps/.github/blob/main/.github/workflows/sync_dependabot_python.yml) workflow detected that **%s**'s \`.github/dependabot.yml\` was either missing or out of date with the [org template](https://github.com/amera-apps/.github/blob/main/.github/dependabot-python-template.yml), and opened a PR to bring it in line.\n\n**PR:** %s\n\n### What to do\n1. Review the PR and confirm the dependabot config looks correct for this repo\n2. Merge when ready\n3. If this repo needs a custom config or should be excluded from syncing, let @naurasj know" "$REPO" "$PR_URL")
+
             curl -s -X POST https://api.linear.app/graphql \
               -H "Content-Type: application/json" \
               -H "Authorization: $LINEAR_API_KEY" \
               -d "$(jq -n \
                 --arg title "Dependabot config sync — review PR for $REPO" \
-                --arg desc "The daily [dependabot config sync](https://github.com/amera-apps/.github/blob/main/.github/workflows/sync_dependabot_python.yml) workflow detected that **${REPO}**'s \`.github/dependabot.yml\` was either missing or out of date with the [org template](https://github.com/amera-apps/.github/blob/main/.github/dependabot-python-template.yml), and opened a PR to bring it in line.\n\n**PR:** ${PR_URL}\n\n### What to do\n1. Review the PR and confirm the dependabot config looks correct for this repo\n2. Merge when ready\n3. If this repo needs a custom config or should be excluded from syncing, let @naurasj know" \
+                --arg desc "$DESC" \
                 --arg team "$LINEAR_TEAM_ID" \
                 --arg project "$LINEAR_PROJECT_ID" \
                 --arg state "$LINEAR_TRIAGE_STATE_ID" \
