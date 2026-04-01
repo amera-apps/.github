@@ -141,7 +141,7 @@ graph TD
     Check -->|"yes + out of date"| PR["Open PR:\nchore/sync-dependabot-config"]
     Check -->|"no or up-to-date"| Skip[Skip]
     PR --> Slack["Slack summary"]
-    PR --> Linear["Linear ticket\n(Triage)"]
+    PR --> Linear["Linear ticket per repo\n(Triage)"]
 ```
 
 **How it works:**
@@ -151,7 +151,7 @@ graph TD
 3. Compares the repo's `.github/dependabot.yml` to the template — skips if already matching
 4. Skips if an open sync PR already exists from a previous run
 5. Creates a branch, commits the template, and opens a PR
-6. After processing all repos, posts a Slack summary and creates a Linear ticket (in Triage) listing the PRs
+6. After processing all repos, posts a Slack summary and creates one Linear ticket per repo (in Triage) for each PR opened
 
 PRs are opened (not direct pushes) to comply with branch protection rules requiring at least one approving review.
 
