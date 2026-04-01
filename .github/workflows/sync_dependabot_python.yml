@@ -15,9 +15,7 @@ on:
 
 jobs:
   sync:
-    runs-on:
-      group: aws
-      labels: ['self-hosted']
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
