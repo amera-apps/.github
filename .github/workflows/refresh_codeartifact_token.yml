@@ -16,6 +16,7 @@ jobs:
   refresh:
     runs-on:
       group: aws
+      labels: ['self-hosted']
     steps:
       - name: Generate GitHub App token
         id: app-token
