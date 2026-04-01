@@ -183,6 +183,7 @@ jobs:
             const summary = { opened, skipped, upToDate, errors }
             core.setOutput('summary', JSON.stringify(summary))
             core.setOutput('opened_count', opened.length)
+            core.setOutput('slack_text', opened.map(o => `- <${o.url}|${o.name}>`).join('\n'))
 
             core.info(`Done. Opened: ${opened.length}, Up-to-date: ${upToDate.length}, Skipped: ${skipped.length}, Errors: ${errors.length}`)
 
@@ -196,7 +197,7 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             channel: ${{ vars.SLACK_DEPENDABOT_ALERTS_CHANNEL_ID }}
-            text: "🔄 *Dependabot config sync* completed.\n${{ fromJSON(steps.sync.outputs.summary).opened.length > 0 && format('*PRs opened:*\n{0}', join(fromJSON(steps.sync.outputs.summary).opened.*.url, '\n')) || 'All repos are up to date — no PRs opened.' }}\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
+            text: "🔄 Dependabot config sync completed.${{ fromJSON(steps.sync.outputs.opened_count) > 0 && format(' PRs opened:\n{0}', steps.sync.outputs.slack_text) || ' All repos are up to date — no PRs opened.' }}\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
 
       - name: Create Linear tickets
         if: >-
