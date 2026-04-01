@@ -1,6 +1,6 @@
 # Dependabot configuration synced from amera-apps/.github.
 # Do not edit in individual repos — changes will be overwritten
-# by the sync_dependabot_config workflow.
+# by the sync_dependabot_python workflow.
 
 version: 2
 

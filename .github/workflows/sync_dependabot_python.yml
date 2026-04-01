@@ -1,4 +1,4 @@
-# .github/workflows/sync_dependabot_config.yml
+# .github/workflows/sync_dependabot_python.yml
 #
 # Ensures every org repo with a pyproject.toml in the root has the correct
 # .github/dependabot.yml. Opens a PR (rather than pushing directly) to
@@ -6,7 +6,7 @@
 #
 # Posts a Slack summary and creates a Linear ticket listing all PRs opened.
 
-name: Sync Dependabot Config
+name: Sync Dependabot Config (Python)
 
 on:
   schedule:
@@ -44,10 +44,10 @@ jobs:
 
             // ── Skip list ────────────────────────────────────────────────────
             // Add repo names here to exclude them from syncing,
-            // even if they have a CodeArtifact-backed pyproject.toml.
+            // even if they have a pyproject.toml.
             const skipRepos = []
 
-            const template = fs.readFileSync('.github/dependabot-template.yml', 'utf8')
+            const template = fs.readFileSync('.github/dependabot-python-template.yml', 'utf8')
             const templateB64 = Buffer.from(template).toString('base64')
 
             const repos = await github.paginate(github.rest.repos.listForOrg, {
@@ -167,7 +167,7 @@ jobs:
                   owner: org,
                   repo: name,
                   title: prTitle,
-                  body: 'Synced from the org-level [`dependabot-template.yml`](https://github.com/amera-apps/.github/blob/main/.github/dependabot-template.yml).\n\nThis configures Dependabot with CodeArtifact registry credentials and enables weekly updates for pip, Docker, and GitHub Actions ecosystems.',
+                  body: 'Synced from the org-level [`dependabot-python-template.yml`](https://github.com/amera-apps/.github/blob/main/.github/dependabot-python-template.yml).\n\nThis configures Dependabot with CodeArtifact registry credentials and enables weekly updates for pip, Docker, and GitHub Actions ecosystems.',
                   head: branch,
                   base: repo.default_branch
                 })
@@ -212,7 +212,7 @@ jobs:
             -H "Authorization: $LINEAR_API_KEY" \
             -d "$(jq -n \
               --arg title "Dependabot config sync — ${{ fromJSON(steps.sync.outputs.opened_count) }} PRs to review" \
-              --arg desc "The weekly Dependabot config sync opened PRs that need review:\n\n${PR_LIST}\n\nThese PRs sync \`.github/dependabot.yml\` from the [org template](https://github.com/amera-apps/.github/blob/main/.github/dependabot-template.yml)." \
+              --arg desc "The weekly Dependabot config sync opened PRs that need review:\n\n${PR_LIST}\n\nThese PRs sync \`.github/dependabot.yml\` from the [org template](https://github.com/amera-apps/.github/blob/main/.github/dependabot-python-template.yml)." \
               --arg team "$LINEAR_TEAM_ID" \
               --arg project "$LINEAR_PROJECT_ID" \
               '{ query: "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { url } } }", variables: { input: { title: $title, description: $desc, teamId: $team, projectId: $project } } }'
