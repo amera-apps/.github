@@ -451,7 +451,7 @@ jobs:
 
             function formatRepoLine({ name, prUrl, prNumber, ticketId, ticketUrl, openedDate }) {
               let line = `• *${name}* — <${prUrl}|PR #${prNumber}>`
-              if (ticketId && ticketUrl) line += ` · <${ticketUrl}|${ticketId}>`
+              if (ticketId && ticketUrl) line += ` — <${ticketUrl}|${ticketId}>`
               if (openedDate) line += ` (opened ${openedDate})`
               return line
             }
@@ -500,4 +500,3 @@ jobs:
           payload: |
             channel: ${{ vars.SLACK_DEPENDABOT_ALERTS_CHANNEL_ID }}
             text: ${{ toJSON(steps.sync.outputs.slack_text) }}
-
