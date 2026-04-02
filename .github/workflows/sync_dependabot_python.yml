@@ -36,8 +36,9 @@ jobs:
           LINEAR_TEAM_ID: ${{ vars.LINEAR_TEAM_ID__AMERA }}
           LINEAR_PROJECT_ID: ${{ vars.LINEAR_PROJECT_ID__SOC2_COMPLIANCE }}
           LINEAR_STATE_ID: ${{ vars.LINEAR_STATE_ID__TO_DO }}
-          LINEAR_ASSIGNEE_ID: ${{ vars.LINEAR_PERSON_ID__NAURAS_J }}
+          LINEAR_FALLBACK_ASSIGNEE_ID: ${{ vars.LINEAR_PERSON_ID__NAURAS_J }}
           LINEAR_LABEL_ID: ${{ vars.LINEAR_LABEL_ID__AMERABOT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
@@ -57,9 +58,140 @@ jobs:
             const template = fs.readFileSync('.github/dependabot-python-template.yml', 'utf8')
             const templateB64 = Buffer.from(template).toString('base64')
 
+            // ── Fetch reference data for auto-assignment ───────────────────
+            let projectMappingMd = ''
+            let personReferenceMd = ''
+            try {
+              const { data } = await github.rest.repos.getContent({
+                owner: org, repo: '.cursor', path: 'skills/amera-index/references/project-mapping.md'
+              })
+              projectMappingMd = Buffer.from(data.content, 'base64').toString('utf8')
+            } catch {
+              core.warning('Could not fetch project-mapping.md from .cursor repo')
+            }
+            try {
+              const { data } = await github.rest.repos.getContent({
+                owner: org, repo: '.cursor', path: 'skills/amera-index/references/person-reference.md'
+              })
+              personReferenceMd = Buffer.from(data.content, 'base64').toString('utf8')
+            } catch {
+              core.warning('Could not fetch person-reference.md from .cursor repo')
+            }
+
+            let linearProjects = []
+            if (process.env.LINEAR_API_KEY) {
+              try {
+                const res = await fetch('https://api.linear.app/graphql', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': process.env.LINEAR_API_KEY
+                  },
+                  body: JSON.stringify({
+                    query: `{ projects(first: 100) { nodes { name lead { id name displayName email } } } }`
+                  })
+                })
+                const { data } = await res.json()
+                linearProjects = (data?.projects?.nodes ?? [])
+                  .filter(p => p.lead)
+                  .map(p => ({ project: p.name, lead: p.lead }))
+                core.info(`Fetched ${linearProjects.length} Linear projects with leads`)
+              } catch (err) {
+                core.warning(`Could not fetch Linear projects: ${err.message}`)
+              }
+            }
+
+            /**
+             * Calls Claude Haiku to resolve the best assignee for a repo.
+             * Returns { linearUserId, githubHandle } or a fallback.
+             */
+            async function resolveAssignee(repoName) {
+              const { ANTHROPIC_API_KEY, LINEAR_FALLBACK_ASSIGNEE_ID } = process.env
+              const fallback = {
+                linearUserId: LINEAR_FALLBACK_ASSIGNEE_ID || null,
+                githubHandle: 'justanothersynth'
+              }
+
+              if (!ANTHROPIC_API_KEY || !projectMappingMd || !personReferenceMd) {
+                core.info(`${repoName}: skipping LLM assignment — missing API key or reference data`)
+                return fallback
+              }
+
+              try {
+                const res = await fetch('https://api.anthropic.com/v1/messages', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': ANTHROPIC_API_KEY,
+                    'anthropic-version': '2023-06-01'
+                  },
+                  body: JSON.stringify({
+                    model: 'claude-haiku-4.5-20250315',
+                    max_tokens: 256,
+                    output_config: {
+                      format: {
+                        type: 'json_schema',
+                        schema: {
+                          type: 'object',
+                          properties: {
+                            linearUserId: { type: ['string', 'null'] },
+                            githubHandle: { type: ['string', 'null'] }
+                          },
+                          required: ['linearUserId', 'githubHandle'],
+                          additionalProperties: false
+                        }
+                      }
+                    },
+                    messages: [{
+                      role: 'user',
+                      content: [
+                        `Given the GitHub repo "${repoName}", determine who should be assigned to review a dependabot config sync PR.`,
+                        '',
+                        'Steps:',
+                        '1. Find the Linear Project for this repo using the GitHub Repo Mapping table',
+                        '2. Find that project\'s lead in the Linear Project Leads data',
+                        '3. Match the lead to a person in the Person Reference Table',
+                        '4. Return their Linear User ID and GitHub Handle',
+                        '',
+                        '## Linear Project Leads',
+                        JSON.stringify(linearProjects, null, 2),
+                        '',
+                        '## GitHub Repo Mapping + Project Keywords',
+                        projectMappingMd,
+                        '',
+                        '## Person Reference Table',
+                        personReferenceMd,
+                        '',
+                        'Return the Linear User ID and GitHub Handle of the best assignee.',
+                        'If no confident match can be made, return null for both fields.'
+                      ].join('\n')
+                    }]
+                  })
+                })
+
+                const result = await res.json()
+                if (result.error) {
+                  core.warning(`${repoName}: Anthropic API error — ${result.error.message}`)
+                  return fallback
+                }
+
+                const parsed = JSON.parse(result.content[0].text)
+                if (parsed.linearUserId && parsed.githubHandle) {
+                  core.info(`${repoName}: LLM assigned to ${parsed.githubHandle} (${parsed.linearUserId})`)
+                  return parsed
+                }
+
+                core.info(`${repoName}: LLM returned null — using fallback assignee`)
+                return fallback
+              } catch (err) {
+                core.warning(`${repoName}: assignee resolution failed — ${err.message}`)
+                return fallback
+              }
+            }
+
             /** Creates a Linear issue and returns { identifier, url } or null. */
-            async function createLinearTicket(repoName) {
-              const { LINEAR_API_KEY, LINEAR_TEAM_ID, LINEAR_PROJECT_ID, LINEAR_STATE_ID, LINEAR_ASSIGNEE_ID, LINEAR_LABEL_ID } = process.env
+            async function createLinearTicket(repoName, assigneeId) {
+              const { LINEAR_API_KEY, LINEAR_TEAM_ID, LINEAR_PROJECT_ID, LINEAR_STATE_ID, LINEAR_LABEL_ID } = process.env
               if (!LINEAR_API_KEY || !LINEAR_TEAM_ID) return null
 
               const description = [
@@ -91,7 +223,7 @@ jobs:
                       priority: 1,
                       ...(LINEAR_PROJECT_ID && { projectId: LINEAR_PROJECT_ID }),
                       ...(LINEAR_STATE_ID && { stateId: LINEAR_STATE_ID }),
-                      ...(LINEAR_ASSIGNEE_ID && { assigneeId: LINEAR_ASSIGNEE_ID }),
+                      ...(assigneeId && { assigneeId }),
                       ...(LINEAR_LABEL_ID && { labelIds: [LINEAR_LABEL_ID] })
                     }
                   }
@@ -259,7 +391,8 @@ jobs:
                   ...(fileSha && { sha: fileSha })
                 })
 
-                const ticket = await createLinearTicket(name)
+                const assignee = await resolveAssignee(name)
+                const ticket = await createLinearTicket(name, assignee.linearUserId)
 
                 const prBody = [
                   `The [dependabot config sync workflow](${workflowUrl}) for Python repos detected that **${name}**'s \`.github/dependabot.yml\` was either missing or out of date with the [org template](${templateUrl}), and opened a PR to bring it in line.`,
@@ -279,6 +412,21 @@ jobs:
                   head: branch,
                   base: repo.default_branch
                 })
+
+                if (assignee.githubHandle) {
+                  try {
+                    await github.rest.issues.addAssignees({
+                      owner: org, repo: name, issue_number: pr.number,
+                      assignees: [assignee.githubHandle]
+                    })
+                    await github.rest.pulls.requestReviewers({
+                      owner: org, repo: name, pull_number: pr.number,
+                      reviewers: [assignee.githubHandle]
+                    })
+                  } catch (err) {
+                    core.warning(`${name}: could not assign ${assignee.githubHandle} — ${err.message}`)
+                  }
+                }
 
                 opened.push({
                   name,

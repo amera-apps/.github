@@ -90,6 +90,7 @@ graph TD
 | `AMERABOT_APP_PRIVATE_KEY` | GitHub App private key |
 | `LINEAR_API_KEY` | Linear API key (used by `sync_dependabot_python` to create tickets) |
 | `SLACK_BOT_TOKEN` | Slack Bot User OAuth Token (used by `sync_dependabot_python` to post summaries) |
+| `ANTHROPIC_API_KEY` | Anthropic API key (used by `sync_dependabot_python` for LLM-based assignee resolution) |
 | `AWS_ACCESS_KEY_ID` | IAM user for CodeArtifact token generation |
 | `AWS_SECRET_ACCESS_KEY` | IAM user for CodeArtifact token generation |
 
@@ -103,7 +104,7 @@ The AWS IAM user should have minimal permissions: `codeartifact:GetAuthorization
 | `LINEAR_TEAM_ID__AMERA` | Linear team (used by `sync_dependabot_python`) |
 | `LINEAR_PROJECT_ID__SOC2_COMPLIANCE` | Linear project (used by `sync_dependabot_python`) |
 | `LINEAR_STATE_ID__TO_DO` | Linear "Todo" workflow state — tickets land here assigned and ready to act on |
-| `LINEAR_PERSON_ID__NAURAS_J` | Linear user ID — default assignee for sync tickets |
+| `LINEAR_PERSON_ID__NAURAS_J` | Linear user ID — fallback assignee when LLM resolution fails |
 | `LINEAR_LABEL_ID__AMERABOT` | Linear label ID — tags tickets as bot-created |
 | `AWS_REGION` | AWS region for CodeArtifact (`us-east-1`) |
 | `AWS_OWNER_ID` | AWS account ID / domain owner (`371568547021`) |
@@ -164,6 +165,10 @@ flowchart TD
 After processing all repos, posts a Slack summary and creates one Linear ticket per repo for each new PR opened.
 
 PRs are opened (not direct pushes) to comply with branch protection rules requiring at least one approving review.
+
+#### Auto-assignment
+
+Each new PR and Linear ticket is automatically assigned to the project lead inferred via an LLM (Claude Haiku). The workflow fetches [`project-mapping.md`](https://github.com/amera-apps/.cursor/blob/main/skills/amera-index/references/project-mapping.md) and [`person-reference.md`](https://github.com/amera-apps/.cursor/blob/main/skills/amera-index/references/person-reference.md) from the `.cursor` repo, queries Linear for project leads, and passes all three data sources to Claude to resolve the best assignee for each repo. If no confident match is found or the `ANTHROPIC_API_KEY` secret is not set, assignment falls back to `LINEAR_PERSON_ID__NAURAS_J`.
 
 #### Skipping repos
 
