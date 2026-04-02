@@ -31,6 +31,11 @@ jobs:
       - name: Sync dependabot config to repos
         id: sync
         uses: actions/github-script@v7
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          LINEAR_TEAM_ID: ${{ vars.LINEAR_AMERA_TEAM_ID }}
+          LINEAR_PROJECT_ID: ${{ vars.LINEAR_DEPENDABOT_ALERTS_PROJECT_ID }}
+          LINEAR_TRIAGE_STATE_ID: ${{ vars.LINEAR_TRIAGE_STATE_ID }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
@@ -39,6 +44,8 @@ jobs:
             const branch = 'chore/sync-dependabot-config'
             const targetPath = '.github/dependabot.yml'
             const prTitle = 'chore: sync dependabot config from org template'
+            const workflowUrl = 'https://github.com/amera-apps/.github/blob/main/.github/workflows/sync_dependabot_python.yml'
+            const templateUrl = 'https://github.com/amera-apps/.github/blob/main/.github/dependabot-python-template.yml'
 
             // ── Skip list ────────────────────────────────────────────────────
             // Add repo names here to exclude them from syncing,
@@ -47,6 +54,55 @@ jobs:
 
             const template = fs.readFileSync('.github/dependabot-python-template.yml', 'utf8')
             const templateB64 = Buffer.from(template).toString('base64')
+
+            /** Creates a Linear issue and returns the identifier (e.g. AMR-42). */
+            async function createLinearTicket(repoName) {
+              const { LINEAR_API_KEY, LINEAR_TEAM_ID, LINEAR_PROJECT_ID, LINEAR_TRIAGE_STATE_ID } = process.env
+              if (!LINEAR_API_KEY || !LINEAR_TEAM_ID) return null
+
+              const description = [
+                `The [dependabot config sync workflow](${workflowUrl}) for Python repos detected that **${repoName}**'s \`.github/dependabot.yml\` was either missing or out of date with the [org template](${templateUrl}), and opened a PR to bring it in line.`,
+                '',
+                '### What to do',
+                '1. Review the PR and confirm the dependabot config looks correct for this repo',
+                '2. Merge when ready',
+                '3. If this repo needs a custom config or should be excluded from syncing, let @naurasj know',
+                '',
+                '> The corresponding PR is auto-linked to this ticket.'
+              ].join('\n')
+
+              const res = await fetch('https://api.linear.app/graphql', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': LINEAR_API_KEY
+                },
+                body: JSON.stringify({
+                  query: `mutation($input: IssueCreateInput!) {
+                    issueCreate(input: $input) { success issue { identifier url } }
+                  }`,
+                  variables: {
+                    input: {
+                      title: `Dependabot config sync — review PR for ${repoName}`,
+                      description,
+                      teamId: LINEAR_TEAM_ID,
+                      ...(LINEAR_PROJECT_ID && { projectId: LINEAR_PROJECT_ID }),
+                      ...(LINEAR_TRIAGE_STATE_ID && { stateId: LINEAR_TRIAGE_STATE_ID })
+                    }
+                  }
+                })
+              })
+
+              const { data } = await res.json()
+              if (!data?.issueCreate?.success) {
+                core.warning(`${repoName}: Linear ticket creation failed`)
+                return null
+              }
+
+              const ticket = data.issueCreate.issue
+              core.info(`${repoName}: created Linear ticket ${ticket.identifier} — ${ticket.url}`)
+              return ticket.identifier
+            }
 
             const repos = await github.paginate(github.rest.repos.listForOrg, {
               org,
@@ -165,18 +221,23 @@ jobs:
                   ...(fileSha && { sha: fileSha })
                 })
 
+                const ticketId = await createLinearTicket(name)
+
+                const prBody = [
+                  `The [dependabot config sync workflow](${workflowUrl}) for Python repos detected that **${name}**'s \`.github/dependabot.yml\` was either missing or out of date with the [org template](${templateUrl}), and opened a PR to bring it in line.`,
+                  '',
+                  '### What to do',
+                  '1. Review the dependabot config and confirm it looks correct for this repo',
+                  '2. Merge when ready',
+                  '3. If this repo needs a custom config or should be excluded from syncing, let @justanothersynth know',
+                  ...(ticketId ? ['', `Resolves ${ticketId}`] : [])
+                ].join('\n')
+
                 const { data: pr } = await github.rest.pulls.create({
                   owner: org,
                   repo: name,
                   title: prTitle,
-                  body: [
-                    'The [dependabot config sync workflow](https://github.com/amera-apps/.github/blob/main/.github/workflows/sync_dependabot_python.yml) detected that this repo\'s `.github/dependabot.yml` was either missing or out of date with the [org template](https://github.com/amera-apps/.github/blob/main/.github/dependabot-python-template.yml), and opened this PR to bring it in line.',
-                    '',
-                    '### What to do',
-                    '1. Review the dependabot config and confirm it looks correct for this repo',
-                    '2. Merge when ready',
-                    '3. If this repo needs a custom config or should be excluded from syncing, let @justanothersynth know'
-                  ].join('\n'),
+                  body: prBody,
                   head: branch,
                   base: repo.default_branch
                 })
@@ -240,35 +301,3 @@ jobs:
             channel: ${{ vars.SLACK_DEPENDABOT_ALERTS_CHANNEL_ID }}
             text: ${{ toJSON(steps.sync.outputs.slack_text) }}
 
-      - name: Create Linear tickets
-        if: >-
-          always()
-          && fromJSON(steps.sync.outputs.opened_count) > 0
-          && (vars.LINEAR_AMERA_TEAM_ID != '')
-        run: |
-          SUMMARY='${{ steps.sync.outputs.summary }}'
-
-          # One ticket per repo, landed in Triage for assignment
-          echo "$SUMMARY" | jq -c '.opened[]' | while read -r item; do
-            REPO=$(echo "$item" | jq -r '.name')
-            PR_URL=$(echo "$item" | jq -r '.url')
-
-            DESC=$(printf "The daily [dependabot config sync](https://github.com/amera-apps/.github/blob/main/.github/workflows/sync_dependabot_python.yml) workflow detected that **%s**'s \`.github/dependabot.yml\` was either missing or out of date with the [org template](https://github.com/amera-apps/.github/blob/main/.github/dependabot-python-template.yml), and opened a PR to bring it in line.\n\n**PR:** %s\n\n### What to do\n1. Review the PR and confirm the dependabot config looks correct for this repo\n2. Merge when ready\n3. If this repo needs a custom config or should be excluded from syncing, let @naurasj know" "$REPO" "$PR_URL")
-
-            curl -s -X POST https://api.linear.app/graphql \
-              -H "Content-Type: application/json" \
-              -H "Authorization: $LINEAR_API_KEY" \
-              -d "$(jq -n \
-                --arg title "Dependabot config sync — review PR for $REPO" \
-                --arg desc "$DESC" \
-                --arg team "$LINEAR_TEAM_ID" \
-                --arg project "$LINEAR_PROJECT_ID" \
-                --arg state "$LINEAR_TRIAGE_STATE_ID" \
-                '{ query: "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { url } } }", variables: { input: { title: $title, description: $desc, teamId: $team, projectId: $project, stateId: $state } } }'
-              )"
-          done
-        env:
-          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
-          LINEAR_TEAM_ID: ${{ vars.LINEAR_AMERA_TEAM_ID }}
-          LINEAR_PROJECT_ID: ${{ vars.LINEAR_DEPENDABOT_ALERTS_PROJECT_ID }}
-          LINEAR_TRIAGE_STATE_ID: ${{ vars.LINEAR_TRIAGE_STATE_ID }}
