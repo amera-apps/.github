@@ -55,6 +55,7 @@ jobs:
             })
 
             const opened = []
+            const pending = []
             const skipped = []
             const upToDate = []
             const errors = []
@@ -108,7 +109,10 @@ jobs:
                 })
 
                 if (existingPRs.length > 0) {
-                  core.info(`${name}: open sync PR already exists — ${existingPRs[0].html_url}`)
+                  const pr = existingPRs[0]
+                  const openedDate = new Date(pr.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+                  pending.push({ name, url: pr.html_url, openedDate })
+                  core.info(`${name}: open sync PR already exists — ${pr.html_url}`)
                   continue
                 }
 
@@ -178,16 +182,48 @@ jobs:
               }
             }
 
-            const summary = { opened, skipped, upToDate, errors }
+            const summary = { opened, pending, skipped, upToDate, errors }
             core.setOutput('summary', JSON.stringify(summary))
             core.setOutput('opened_count', opened.length)
-            core.setOutput('slack_text', opened.map(o => `- <${o.url}|${o.name}>`).join('\n'))
 
-            core.info(`Done. Opened: ${opened.length}, Up-to-date: ${upToDate.length}, Skipped: ${skipped.length}, Errors: ${errors.length}`)
+            // ── Build Slack message ────────────────────────────────────────
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+            const lines = []
+
+            if (opened.length > 0) {
+              const s = opened.length === 1 ? '' : 's'
+              const verb = opened.length === 1 ? 'its' : 'their'
+              lines.push(`I just reviewed all our Python repos and opened ${opened.length} new PR${s} to sync ${verb} dependabot config with the org template.`)
+              lines.push('')
+              lines.push('*Newly opened:*')
+              for (const o of opened) lines.push(`• <${o.url}|${o.name}>`)
+            }
+
+            if (pending.length > 0) {
+              if (opened.length > 0) {
+                lines.push('')
+                lines.push('*Still awaiting merge:*')
+              } else {
+                lines.push('I just reviewed all our Python repos — everything is in sync, but some PRs from previous runs are still awaiting merge:')
+                lines.push('')
+              }
+              for (const p of pending) lines.push(`• <${p.url}|${p.name}> (opened ${p.openedDate})`)
+            }
+
+            if (lines.length > 0) {
+              lines.push('')
+              lines.push(`<${runUrl}|View workflow run>`)
+            }
+
+            core.setOutput('slack_text', lines.join('\n'))
+            core.setOutput('should_post_slack', lines.length > 0)
+
+            core.info(`Done. Opened: ${opened.length}, Pending: ${pending.length}, Up-to-date: ${upToDate.length}, Skipped: ${skipped.length}, Errors: ${errors.length}`)
 
       - name: Post Slack summary
         if: >-
           always()
+          && steps.sync.outputs.should_post_slack == 'true'
           && (vars.SLACK_DEPENDABOT_ALERTS_CHANNEL_ID != '')
         uses: slackapi/slack-github-action@v2
         with:
@@ -195,7 +231,7 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             channel: ${{ vars.SLACK_DEPENDABOT_ALERTS_CHANNEL_ID }}
-            text: "🔄 Dependabot config sync completed.${{ fromJSON(steps.sync.outputs.opened_count) > 0 && format(' PRs opened:\n{0}', steps.sync.outputs.slack_text) || ' All repos are up to date — no PRs opened.' }}\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
+            text: ${{ toJSON(steps.sync.outputs.slack_text) }}
 
       - name: Create Linear tickets
         if: >-
