@@ -169,7 +169,14 @@ jobs:
                   owner: org,
                   repo: name,
                   title: prTitle,
-                  body: 'Synced from the org-level [`dependabot-python-template.yml`](https://github.com/amera-apps/.github/blob/main/.github/dependabot-python-template.yml).\n\nThis configures Dependabot with CodeArtifact registry credentials and enables weekly updates for pip, Docker, and GitHub Actions ecosystems.',
+                  body: [
+                    'The [dependabot config sync workflow](https://github.com/amera-apps/.github/blob/main/.github/workflows/sync_dependabot_python.yml) detected that this repo\'s `.github/dependabot.yml` was either missing or out of date with the [org template](https://github.com/amera-apps/.github/blob/main/.github/dependabot-python-template.yml), and opened this PR to bring it in line.',
+                    '',
+                    '### What to do',
+                    '1. Review the dependabot config and confirm it looks correct for this repo',
+                    '2. Merge when ready',
+                    '3. If this repo needs a custom config or should be excluded from syncing, let @justanothersynth know'
+                  ].join('\n'),
                   head: branch,
                   base: repo.default_branch
                 })
