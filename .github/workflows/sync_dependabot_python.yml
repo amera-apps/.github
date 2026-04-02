@@ -172,8 +172,35 @@ jobs:
                 if (existingPRs.length > 0) {
                   const pr = existingPRs[0]
                   const openedDate = new Date(pr.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+
+                  let prBranchContent = null
+                  let prBranchFileSha = null
+                  try {
+                    const { data } = await github.rest.repos.getContent({
+                      owner: org, repo: name, path: targetPath, ref: branch
+                    })
+                    prBranchContent = Buffer.from(data.content, 'base64').toString('utf8')
+                    prBranchFileSha = data.sha
+                  } catch {
+                    // file doesn't exist on PR branch
+                  }
+
+                  if (prBranchContent === template) {
+                    pending.push({ name, url: pr.html_url, openedDate })
+                    core.info(`${name}: open sync PR already up to date`)
+                    continue
+                  }
+
+                  await github.rest.repos.createOrUpdateFileContents({
+                    owner: org, repo: name, path: targetPath,
+                    message: 'chore: update dependabot config to latest org template',
+                    content: templateB64,
+                    branch,
+                    ...(prBranchFileSha && { sha: prBranchFileSha })
+                  })
+
                   pending.push({ name, url: pr.html_url, openedDate })
-                  core.info(`${name}: open sync PR already exists — ${pr.html_url}`)
+                  core.info(`${name}: pushed updated template to existing PR — ${pr.html_url}`)
                   continue
                 }
 
