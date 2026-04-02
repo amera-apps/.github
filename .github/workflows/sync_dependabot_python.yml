@@ -57,7 +57,7 @@ jobs:
             const template = fs.readFileSync('.github/dependabot-python-template.yml', 'utf8')
             const templateB64 = Buffer.from(template).toString('base64')
 
-            /** Creates a Linear issue and returns the identifier (e.g. AMR-42). */
+            /** Creates a Linear issue and returns { identifier, url } or null. */
             async function createLinearTicket(repoName) {
               const { LINEAR_API_KEY, LINEAR_TEAM_ID, LINEAR_PROJECT_ID, LINEAR_STATE_ID, LINEAR_ASSIGNEE_ID, LINEAR_LABEL_ID } = process.env
               if (!LINEAR_API_KEY || !LINEAR_TEAM_ID) return null
@@ -106,7 +106,7 @@ jobs:
 
               const ticket = data.issueCreate.issue
               core.info(`${repoName}: created Linear ticket ${ticket.identifier} — ${ticket.url}`)
-              return ticket.identifier
+              return { identifier: ticket.identifier, url: ticket.url }
             }
 
             const repos = await github.paginate(github.rest.repos.listForOrg, {
@@ -173,6 +173,10 @@ jobs:
                   const pr = existingPRs[0]
                   const openedDate = new Date(pr.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 
+                  const ticketMatch = pr.body?.match(/Resolves (AMR-\d+)/)
+                  const ticketId = ticketMatch ? ticketMatch[1] : null
+                  const ticketUrl = ticketId ? `https://linear.app/amera/issue/${ticketId}` : null
+
                   let prBranchContent = null
                   let prBranchFileSha = null
                   try {
@@ -185,8 +189,10 @@ jobs:
                     // file doesn't exist on PR branch
                   }
 
+                  const pendingEntry = { name, prUrl: pr.html_url, prNumber: pr.number, ticketId, ticketUrl, openedDate }
+
                   if (prBranchContent === template) {
-                    pending.push({ name, url: pr.html_url, openedDate })
+                    pending.push(pendingEntry)
                     core.info(`${name}: open sync PR already up to date`)
                     continue
                   }
@@ -199,7 +205,7 @@ jobs:
                     ...(prBranchFileSha && { sha: prBranchFileSha })
                   })
 
-                  pending.push({ name, url: pr.html_url, openedDate })
+                  pending.push(pendingEntry)
                   core.info(`${name}: pushed updated template to existing PR — ${pr.html_url}`)
                   continue
                 }
@@ -253,7 +259,7 @@ jobs:
                   ...(fileSha && { sha: fileSha })
                 })
 
-                const ticketId = await createLinearTicket(name)
+                const ticket = await createLinearTicket(name)
 
                 const prBody = [
                   `The [dependabot config sync workflow](${workflowUrl}) for Python repos detected that **${name}**'s \`.github/dependabot.yml\` was either missing or out of date with the [org template](${templateUrl}), and opened a PR to bring it in line.`,
@@ -262,7 +268,7 @@ jobs:
                   '1. Review the dependabot config and confirm it looks correct for this repo',
                   '2. Merge when ready',
                   '3. If this repo needs a custom config or should be excluded from syncing, let @justanothersynth know',
-                  ...(ticketId ? ['', `Resolves ${ticketId}`] : [])
+                  ...(ticket ? ['', `Resolves ${ticket.identifier}`] : [])
                 ].join('\n')
 
                 const { data: pr } = await github.rest.pulls.create({
@@ -274,7 +280,13 @@ jobs:
                   base: repo.default_branch
                 })
 
-                opened.push({ name, url: pr.html_url })
+                opened.push({
+                  name,
+                  prUrl: pr.html_url,
+                  prNumber: pr.number,
+                  ticketId: ticket?.identifier ?? null,
+                  ticketUrl: ticket?.url ?? null
+                })
                 core.info(`${name}: opened PR — ${pr.html_url}`)
               } catch (err) {
                 errors.push({ name, error: err.message })
@@ -288,6 +300,14 @@ jobs:
 
             // ── Build Slack message ────────────────────────────────────────
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+
+            function formatRepoLine({ name, prUrl, prNumber, ticketId, ticketUrl, openedDate }) {
+              let line = `• *${name}* — <${prUrl}|PR #${prNumber}>`
+              if (ticketId && ticketUrl) line += ` · <${ticketUrl}|${ticketId}>`
+              if (openedDate) line += ` (opened ${openedDate})`
+              return line
+            }
+
             const lines = []
 
             if (opened.length > 0) {
@@ -296,7 +316,7 @@ jobs:
               lines.push(`I just reviewed all our Python repos and opened ${opened.length} new PR${s} to sync ${verb} dependabot config with the org template.`)
               lines.push('')
               lines.push('*Newly opened:*')
-              for (const o of opened) lines.push(`• <${o.url}|${o.name}>`)
+              for (const o of opened) lines.push(formatRepoLine(o))
             }
 
             if (pending.length > 0) {
@@ -307,7 +327,7 @@ jobs:
                 lines.push('I just reviewed all our Python repos — everything is in sync, but some PRs from previous runs are still awaiting merge:')
                 lines.push('')
               }
-              for (const p of pending) lines.push(`• <${p.url}|${p.name}> (opened ${p.openedDate})`)
+              for (const p of pending) lines.push(formatRepoLine(p))
             }
 
             if (lines.length > 0) {
