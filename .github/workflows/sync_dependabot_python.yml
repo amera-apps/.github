@@ -534,3 +534,5 @@ jobs:
           payload: |
             channel: ${{ vars.SLACK_DEPENDABOT_ALERTS_CHANNEL_ID }}
             text: ${{ toJSON(steps.sync.outputs.slack_text) }}
+            unfurl_links: false
+            unfurl_media: false
