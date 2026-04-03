@@ -103,13 +103,16 @@ jobs:
 
             /**
              * Calls Claude Haiku to resolve the best assignee for a repo.
-             * Returns { linearUserId, githubHandle } or a fallback.
+             * When knownGithubHandle is provided (e.g. from an existing PR),
+             * it is passed as a hint for a more confident match.
+             * Returns { linearUserId, githubHandle, fullName } or a fallback.
              */
-            async function resolveAssignee(repoName) {
+            async function resolveAssignee(repoName, knownGithubHandle = null) {
               const { ANTHROPIC_API_KEY, LINEAR_FALLBACK_ASSIGNEE_ID } = process.env
               const fallback = {
                 linearUserId: LINEAR_FALLBACK_ASSIGNEE_ID || null,
-                githubHandle: 'justanothersynth'
+                githubHandle: 'justanothersynth',
+                fullName: 'Nauras Jabari'
               }
 
               if (!ANTHROPIC_API_KEY || !projectMappingMd || !personReferenceMd) {
@@ -118,6 +121,10 @@ jobs:
               }
 
               try {
+                const hintBlock = knownGithubHandle
+                  ? [`\nThe PR is currently assigned to GitHub handle "${knownGithubHandle}". Look this person up in the Person Reference Table and return their details.\n`]
+                  : []
+
                 const res = await fetch('https://api.anthropic.com/v1/messages', {
                   method: 'POST',
                   headers: {
@@ -135,9 +142,10 @@ jobs:
                           type: 'object',
                           properties: {
                             linearUserId: { type: ['string', 'null'] },
-                            githubHandle: { type: ['string', 'null'] }
+                            githubHandle: { type: ['string', 'null'] },
+                            fullName: { type: ['string', 'null'] }
                           },
-                          required: ['linearUserId', 'githubHandle'],
+                          required: ['linearUserId', 'githubHandle', 'fullName'],
                           additionalProperties: false
                         }
                       }
@@ -147,11 +155,12 @@ jobs:
                       content: [
                         `Given the GitHub repo "${repoName}", determine who should be assigned to review a dependabot config sync PR.`,
                         '',
+                        ...hintBlock,
                         'Steps:',
                         '1. Find the Linear Project for this repo using the GitHub Repo Mapping table',
                         '2. Find that project\'s lead in the Linear Project Leads data',
                         '3. Match the lead to a person in the Person Reference Table',
-                        '4. Return their Linear User ID and GitHub Handle',
+                        '4. Return their Linear User ID, GitHub Handle, and full Name',
                         '',
                         '## Linear Project Leads',
                         JSON.stringify(linearProjects, null, 2),
@@ -162,8 +171,8 @@ jobs:
                         '## Person Reference Table',
                         personReferenceMd,
                         '',
-                        'Return the Linear User ID and GitHub Handle of the best assignee.',
-                        'If no confident match can be made, return null for both fields.'
+                        'Return the Linear User ID, GitHub Handle, and full Name of the best assignee.',
+                        'If no confident match can be made, return null for all fields.'
                       ].join('\n')
                     }]
                   })
@@ -177,7 +186,7 @@ jobs:
 
                 const parsed = JSON.parse(result.content[0].text)
                 if (parsed.linearUserId && parsed.githubHandle) {
-                  core.info(`${repoName}: LLM assigned to ${parsed.githubHandle} (${parsed.linearUserId})`)
+                  core.info(`${repoName}: LLM assigned to ${parsed.fullName} / ${parsed.githubHandle} (${parsed.linearUserId})`)
                   return parsed
                 }
 
@@ -309,6 +318,31 @@ jobs:
                   const ticketId = ticketMatch ? ticketMatch[1] : null
                   const ticketUrl = ticketId ? `https://linear.app/amera/issue/${ticketId}` : null
 
+                  const prAssigneeHandle = pr.assignees?.[0]?.login ?? null
+                  const assignee = await resolveAssignee(name, prAssigneeHandle)
+
+                  if (!prAssigneeHandle && assignee.githubHandle) {
+                    try {
+                      await github.rest.issues.addAssignees({
+                        owner: org, repo: name, issue_number: pr.number,
+                        assignees: [assignee.githubHandle]
+                      })
+                      await github.rest.pulls.requestReviewers({
+                        owner: org, repo: name, pull_number: pr.number,
+                        reviewers: [assignee.githubHandle]
+                      })
+                      core.info(`${name}: retried assignment — assigned to ${assignee.githubHandle}`)
+                    } catch (err) {
+                      core.warning(`${name}: retry assignment failed — ${err.message}`)
+                    }
+                  }
+
+                  const pendingEntry = {
+                    name, prUrl: pr.html_url, prNumber: pr.number,
+                    ticketId, ticketUrl, openedDate,
+                    assigneeName: assignee.fullName ?? null
+                  }
+
                   let prBranchContent = null
                   let prBranchFileSha = null
                   try {
@@ -320,8 +354,6 @@ jobs:
                   } catch {
                     // file doesn't exist on PR branch
                   }
-
-                  const pendingEntry = { name, prUrl: pr.html_url, prNumber: pr.number, ticketId, ticketUrl, openedDate }
 
                   if (prBranchContent === template) {
                     pending.push(pendingEntry)
@@ -433,7 +465,8 @@ jobs:
                   prUrl: pr.html_url,
                   prNumber: pr.number,
                   ticketId: ticket?.identifier ?? null,
-                  ticketUrl: ticket?.url ?? null
+                  ticketUrl: ticket?.url ?? null,
+                  assigneeName: assignee.fullName ?? null
                 })
                 core.info(`${name}: opened PR — ${pr.html_url}`)
               } catch (err) {
@@ -449,9 +482,10 @@ jobs:
             // ── Build Slack message ────────────────────────────────────────
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
 
-            function formatRepoLine({ name, prUrl, prNumber, ticketId, ticketUrl, openedDate }) {
+            function formatRepoLine({ name, prUrl, prNumber, ticketId, ticketUrl, openedDate, assigneeName }) {
               let line = `• *${name}* — <${prUrl}|PR #${prNumber}>`
               if (ticketId && ticketUrl) line += ` — <${ticketUrl}|${ticketId}>`
+              if (assigneeName) line += ` — ${assigneeName}`
               if (openedDate) line += ` (opened ${openedDate})`
               return line
             }
