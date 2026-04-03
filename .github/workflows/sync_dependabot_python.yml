@@ -495,7 +495,7 @@ jobs:
             if (opened.length > 0) {
               const s = opened.length === 1 ? '' : 's'
               const verb = opened.length === 1 ? 'its' : 'their'
-              lines.push(`*\`dependabot.yml\`* sync service — I just reviewed all our Python repos and opened ${opened.length} new PR${s} to sync ${verb} dependabot config with the org template.`)
+              lines.push(`🔄 *\`dependabot.yml\` sync service* — I just reviewed all our Python repos and opened ${opened.length} new PR${s} to sync ${verb} dependabot config with the org template.`)
               lines.push('')
               lines.push('*Newly opened:*')
               for (const o of opened) lines.push(formatRepoLine(o))
@@ -506,7 +506,7 @@ jobs:
                 lines.push('')
                 lines.push('*Still awaiting merge:*')
               } else {
-                lines.push('*`dependabot.yml`* sync service — I just reviewed all our Python repos — everything is in sync, but some PRs from previous runs are still awaiting merge:')
+                lines.push('🔄 *`dependabot.yml` sync service* — I just reviewed all our Python repos — everything is in sync, but some PRs from previous runs are still awaiting merge:')
                 lines.push('')
               }
               for (const p of pending) lines.push(formatRepoLine(p))
