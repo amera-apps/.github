@@ -28,7 +28,10 @@ graph TD
     subgraph infra [Infrastructure Workflows]
         Refresh["refresh_codeartifact_token\n(every 10h)"] -->|"rotates"| CASecret["Org Dependabot secret:\nCA_TOKEN"]
         Sync["sync_dependabot_python\n(daily)"] -->|"opens PRs"| DYml["dependabot.yml\n(per repo)"]
+        AutoFix["auto_fix_transitive_dep\n(on dispatch)"] -->|"opens PRs"| FixPR["Lockfile fix PR\n(per repo)"]
     end
+
+    AlertHandler -->|"workflow_dispatch\n(fixable_manual)"| AutoFix
 ```
 
 **Vulnerability lifecycle (detailed)**
@@ -69,6 +72,7 @@ graph TD
    - **Organization Dependabot secrets:** Read and write (for `refresh_codeartifact_token`)
    - **Contents:** Read and write (for `sync_dependabot_python`)
    - **Pull requests:** Read and write (for `sync_dependabot_python` and the Lambda)
+   - **Actions:** Read and write (for `auto_fix_transitive_dep`)
 2. Install it on all repos
 3. Note the **installation ID** from `https://github.com/organizations/amera-apps/settings/installations`
 
@@ -190,3 +194,32 @@ To change the Dependabot config across all repos:
 4. Review and merge the PRs opened in each repo
 
 If repos already have open sync PRs from a previous run, the workflow pushes an updated commit to those PRs automatically — no need to close and re-run.
+
+### Auto-fix Transitive Dependencies
+
+[`.github/workflows/auto_fix_transitive_dep.yml`](.github/workflows/auto_fix_transitive_dep.yml)
+
+When the [amera-dependabot Lambda](https://github.com/amera-apps/infra/tree/main/aws/lambda/amera-dependabot) classifies a Dependabot alert as `fixable_manual` (a transitive dependency vulnerability that Dependabot can't fix on its own), it dispatches this workflow via `workflow_dispatch`. The workflow checks out the target repo, runs `poetry update` (pip) or `npm update` (npm) for the vulnerable package, verifies the fix with `pip-audit` / `npm audit`, and opens a PR with security metadata. If the target repo has a `staging` branch, the PR is retargeted to it.
+
+```mermaid
+graph LR
+    Lambda["amera-dependabot\nLambda"] -->|"workflow_dispatch"| WF["auto_fix_transitive_dep"]
+    WF -->|"checkout + update"| Repo["Target Repo"]
+    Repo -->|"poetry.lock / package-lock.json"| Audit["Verify fix"]
+    Audit --> PR["Open PR\n(fix/GHSA-xxx)"]
+    PR -->|"retarget if exists"| Staging["staging branch"]
+```
+
+**Workflow inputs:**
+
+| Input | Required | Description |
+|-------|----------|-------------|
+| `target_repo` | Yes | Repo name (short, not full_name) to fix |
+| `packages` | Yes | Space-separated package names to update |
+| `ecosystem` | Yes | Package ecosystem (`pip` or `npm`) |
+| `ghsa_ids` | Yes | GHSA ID(s) for branch name and PR metadata |
+| `severity` | Yes | Alert severity (`critical`, `high`, `medium`, `low`) |
+| `linear_ticket` | No | Linear ticket identifier (e.g. `AMR-123`) |
+| `alert_url` | No | GitHub Dependabot alert URL |
+
+CodeArtifact authentication is handled inline — the workflow generates a fresh token using the same AWS credentials as `refresh_codeartifact_token` rather than depending on the Dependabot-scoped `CA_TOKEN` secret.
