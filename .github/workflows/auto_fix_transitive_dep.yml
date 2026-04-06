@@ -1,0 +1,273 @@
+# .github/workflows/auto_fix_transitive_dep.yml
+#
+# Automatically fixes transitive dependency vulnerabilities by updating
+# the lockfile and opening a PR in the affected repo. Triggered by the
+# amera-dependabot Lambda when it classifies an alert as fixable_manual.
+
+name: Auto-fix transitive dependency
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        required: true
+        type: string
+        description: 'Repo name (short, not full_name) to fix'
+      packages:
+        required: true
+        type: string
+        description: 'Space-separated package names to update'
+      ecosystem:
+        required: true
+        type: string
+        description: 'Package ecosystem (pip, npm)'
+      ghsa_ids:
+        required: true
+        type: string
+        description: 'GHSA ID(s) for the branch name and PR metadata'
+      severity:
+        required: true
+        type: string
+        description: 'Alert severity (critical, high, medium, low)'
+      linear_ticket:
+        required: false
+        type: string
+        description: 'Linear ticket identifier (e.g. AMR-123)'
+      alert_url:
+        required: false
+        type: string
+        description: 'GitHub Dependabot alert URL'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-fix-${{ inputs.target_repo }}-${{ inputs.ghsa_ids }}
+  cancel-in-progress: false
+
+jobs:
+  fix-python:
+    if: inputs.ecosystem == 'pip'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.AMERABOT_APP_ID }}
+          private-key: ${{ secrets.AMERABOT_APP_PRIVATE_KEY }}
+          owner: amera-apps
+          repositories: ${{ inputs.target_repo }}
+
+      - name: Checkout target repo
+        uses: actions/checkout@v5
+        with:
+          repository: amera-apps/${{ inputs.target_repo }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Get CodeArtifact token
+        id: ca
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOKEN="$(aws codeartifact get-authorization-token \
+            --domain amera-artifacts \
+            --domain-owner ${{ vars.AWS_OWNER_ID }} \
+            --region "${{ vars.AWS_REGION }}" \
+            --query authorizationToken --output text)"
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate Poetry
+        run: |
+          poetry source add --priority=supplemental codeartifact \
+            https://amera-artifacts-371568547021.d.codeartifact.us-east-1.amazonaws.com/pypi/amera-python/simple/
+          poetry config http-basic.codeartifact aws "${{ steps.ca.outputs.token }}"
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      - name: Update vulnerable packages
+        id: update
+        env:
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          echo "::group::poetry update output"
+          poetry update $PACKAGES --no-interaction 2>&1 | tee /tmp/update_output.txt
+          echo "::endgroup::"
+
+          if git diff --quiet poetry.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No lockfile changes — package may already be up to date"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify fix with pip-audit
+        if: steps.update.outputs.changed == 'true'
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit --require-hashes=false --progress-spinner=off
+
+      - name: Create PR
+        if: steps.update.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        id: create-pr
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: fix/${{ inputs.ghsa_ids }}
+          commit-message: 'fix: update ${{ inputs.packages }} to resolve ${{ inputs.ghsa_ids }}'
+          title: 'fix: update ${{ inputs.packages }} (${{ inputs.ghsa_ids }})'
+          body: |
+            ## Summary
+
+            Automated fix for a **${{ inputs.severity }}**-severity transitive dependency vulnerability.
+
+            Updates `${{ inputs.packages }}` to resolve [${{ inputs.ghsa_ids }}](https://github.com/advisories/${{ inputs.ghsa_ids }}).
+
+            **Opened by:** [amera-dependabot](https://github.com/amera-apps/infra/tree/main/aws/lambda/amera-dependabot) via [auto-fix workflow](https://github.com/amera-apps/.github/blob/main/.github/workflows/auto_fix_transitive_dep.yml)
+            ${{ inputs.alert_url && format('**Alert:** {0}', inputs.alert_url) || '' }}
+
+            ### What to do
+
+            1. Review the lockfile changes
+            2. Confirm CI passes
+            3. Merge when ready
+
+            ${{ inputs.linear_ticket && format('Resolves {0}', inputs.linear_ticket) || '' }}
+          labels: |
+            security
+            automated-fix
+
+      - name: Retarget to staging
+        if: steps.create-pr.outputs.pull-request-number
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+        run: |
+          if gh api "repos/amera-apps/$TARGET_REPO/branches/staging" --silent 2>/dev/null; then
+            gh pr edit ${{ steps.create-pr.outputs.pull-request-number }} \
+              --repo "amera-apps/$TARGET_REPO" \
+              --base staging
+            echo "Retargeted PR to staging"
+          fi
+
+      - name: Resolve assignee and assign
+        if: steps.create-pr.outputs.pull-request-number
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          echo "TODO: assignee resolution — reuse resolveAssignee logic from sync_dependabot_python.yml"
+
+  fix-npm:
+    if: inputs.ecosystem == 'npm'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.AMERABOT_APP_ID }}
+          private-key: ${{ secrets.AMERABOT_APP_PRIVATE_KEY }}
+          owner: amera-apps
+          repositories: ${{ inputs.target_repo }}
+
+      - name: Checkout target repo
+        uses: actions/checkout@v5
+        with:
+          repository: amera-apps/${{ inputs.target_repo }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Update vulnerable packages
+        id: update
+        env:
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          npm update $PACKAGES
+
+          if git diff --quiet package-lock.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No lockfile changes — package may already be up to date"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify fix with npm audit
+        if: steps.update.outputs.changed == 'true'
+        continue-on-error: true
+        run: npm audit
+
+      - name: Create PR
+        if: steps.update.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        id: create-pr
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: fix/${{ inputs.ghsa_ids }}
+          commit-message: 'fix: update ${{ inputs.packages }} to resolve ${{ inputs.ghsa_ids }}'
+          title: 'fix: update ${{ inputs.packages }} (${{ inputs.ghsa_ids }})'
+          body: |
+            ## Summary
+
+            Automated fix for a **${{ inputs.severity }}**-severity transitive dependency vulnerability.
+
+            Updates `${{ inputs.packages }}` to resolve [${{ inputs.ghsa_ids }}](https://github.com/advisories/${{ inputs.ghsa_ids }}).
+
+            **Opened by:** [amera-dependabot](https://github.com/amera-apps/infra/tree/main/aws/lambda/amera-dependabot) via [auto-fix workflow](https://github.com/amera-apps/.github/blob/main/.github/workflows/auto_fix_transitive_dep.yml)
+            ${{ inputs.alert_url && format('**Alert:** {0}', inputs.alert_url) || '' }}
+
+            ### What to do
+
+            1. Review the lockfile changes
+            2. Confirm CI passes
+            3. Merge when ready
+
+            ${{ inputs.linear_ticket && format('Resolves {0}', inputs.linear_ticket) || '' }}
+          labels: |
+            security
+            automated-fix
+
+      - name: Retarget to staging
+        if: steps.create-pr.outputs.pull-request-number
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+        run: |
+          if gh api "repos/amera-apps/$TARGET_REPO/branches/staging" --silent 2>/dev/null; then
+            gh pr edit ${{ steps.create-pr.outputs.pull-request-number }} \
+              --repo "amera-apps/$TARGET_REPO" \
+              --base staging
+            echo "Retargeted PR to staging"
+          fi
+
+      - name: Resolve assignee and assign
+        if: steps.create-pr.outputs.pull-request-number
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          echo "TODO: assignee resolution — reuse resolveAssignee logic from sync_dependabot_python.yml"
