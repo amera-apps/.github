@@ -101,9 +101,11 @@ jobs:
 
       - name: Update vulnerable packages
         id: update
+        env:
+          PACKAGES: ${{ inputs.packages }}
         run: |
           echo "::group::poetry update output"
-          poetry update ${{ inputs.packages }} --no-interaction 2>&1 | tee /tmp/update_output.txt
+          poetry update $PACKAGES --no-interaction 2>&1 | tee /tmp/update_output.txt
           echo "::endgroup::"
 
           if git diff --quiet poetry.lock; then
@@ -137,6 +139,7 @@ jobs:
             Updates `${{ inputs.packages }}` to resolve [${{ inputs.ghsa_ids }}](https://github.com/advisories/${{ inputs.ghsa_ids }}).
 
             **Opened by:** [amera-dependabot](https://github.com/amera-apps/infra/tree/main/aws/lambda/amera-dependabot) via [auto-fix workflow](https://github.com/amera-apps/.github/blob/main/.github/workflows/auto_fix_transitive_dep.yml)
+            ${{ inputs.alert_url && format('**Alert:** {0}', inputs.alert_url) || '' }}
 
             ### What to do
 
@@ -154,10 +157,11 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET_REPO: ${{ inputs.target_repo }}
         run: |
-          if gh api repos/amera-apps/${{ inputs.target_repo }}/branches/staging --silent 2>/dev/null; then
+          if gh api "repos/amera-apps/$TARGET_REPO/branches/staging" --silent 2>/dev/null; then
             gh pr edit ${{ steps.create-pr.outputs.pull-request-number }} \
-              --repo amera-apps/${{ inputs.target_repo }} \
+              --repo "amera-apps/$TARGET_REPO" \
               --base staging
             echo "Retargeted PR to staging"
           fi
@@ -196,8 +200,10 @@ jobs:
 
       - name: Update vulnerable packages
         id: update
+        env:
+          PACKAGES: ${{ inputs.packages }}
         run: |
-          npm update ${{ inputs.packages }}
+          npm update $PACKAGES
 
           if git diff --quiet package-lock.json; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -228,6 +234,7 @@ jobs:
             Updates `${{ inputs.packages }}` to resolve [${{ inputs.ghsa_ids }}](https://github.com/advisories/${{ inputs.ghsa_ids }}).
 
             **Opened by:** [amera-dependabot](https://github.com/amera-apps/infra/tree/main/aws/lambda/amera-dependabot) via [auto-fix workflow](https://github.com/amera-apps/.github/blob/main/.github/workflows/auto_fix_transitive_dep.yml)
+            ${{ inputs.alert_url && format('**Alert:** {0}', inputs.alert_url) || '' }}
 
             ### What to do
 
@@ -245,10 +252,11 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET_REPO: ${{ inputs.target_repo }}
         run: |
-          if gh api repos/amera-apps/${{ inputs.target_repo }}/branches/staging --silent 2>/dev/null; then
+          if gh api "repos/amera-apps/$TARGET_REPO/branches/staging" --silent 2>/dev/null; then
             gh pr edit ${{ steps.create-pr.outputs.pull-request-number }} \
-              --repo amera-apps/${{ inputs.target_repo }} \
+              --repo "amera-apps/$TARGET_REPO" \
               --base staging
             echo "Retargeted PR to staging"
           fi
