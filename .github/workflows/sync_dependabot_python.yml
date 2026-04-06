@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Generate GitHub App token
         id: app-token
@@ -30,7 +30,15 @@ jobs:
 
       - name: Sync dependabot config to repos
         id: sync
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          LINEAR_TEAM_ID: ${{ vars.LINEAR_TEAM_ID__AMERA }}
+          LINEAR_PROJECT_ID: ${{ vars.LINEAR_PROJECT_ID__SOC2_COMPLIANCE }}
+          LINEAR_STATE_ID: ${{ vars.LINEAR_STATE_ID__TO_DO }}
+          LINEAR_FALLBACK_ASSIGNEE_ID: ${{ vars.LINEAR_PERSON_ID__NAURAS_J }}
+          LINEAR_LABEL_ID: ${{ vars.LINEAR_LABEL_ID__AMERABOT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
@@ -39,6 +47,8 @@ jobs:
             const branch = 'chore/sync-dependabot-config'
             const targetPath = '.github/dependabot.yml'
             const prTitle = 'chore: sync dependabot config from org template'
+            const workflowUrl = 'https://github.com/amera-apps/.github/blob/main/.github/workflows/sync_dependabot_python.yml'
+            const templateUrl = 'https://github.com/amera-apps/.github/blob/main/.github/dependabot-python-template.yml'
 
             // ── Skip list ────────────────────────────────────────────────────
             // Add repo names here to exclude them from syncing,
@@ -48,6 +58,198 @@ jobs:
             const template = fs.readFileSync('.github/dependabot-python-template.yml', 'utf8')
             const templateB64 = Buffer.from(template).toString('base64')
 
+            // ── Fetch reference data for auto-assignment ───────────────────
+            let projectMappingMd = ''
+            let personReferenceMd = ''
+            try {
+              const { data } = await github.rest.repos.getContent({
+                owner: org, repo: '.cursor', path: 'skills/amera-index/references/project-mapping.md'
+              })
+              projectMappingMd = Buffer.from(data.content, 'base64').toString('utf8')
+            } catch {
+              core.warning('Could not fetch project-mapping.md from .cursor repo')
+            }
+            try {
+              const { data } = await github.rest.repos.getContent({
+                owner: org, repo: '.cursor', path: 'skills/amera-index/references/person-reference.md'
+              })
+              personReferenceMd = Buffer.from(data.content, 'base64').toString('utf8')
+            } catch {
+              core.warning('Could not fetch person-reference.md from .cursor repo')
+            }
+
+            let linearProjects = []
+            if (process.env.LINEAR_API_KEY) {
+              try {
+                const res = await fetch('https://api.linear.app/graphql', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': process.env.LINEAR_API_KEY
+                  },
+                  body: JSON.stringify({
+                    query: `{ projects(first: 100) { nodes { name lead { id name displayName email } } } }`
+                  })
+                })
+                const { data } = await res.json()
+                linearProjects = (data?.projects?.nodes ?? [])
+                  .filter(p => p.lead)
+                  .map(p => ({ project: p.name, lead: p.lead }))
+                core.info(`Fetched ${linearProjects.length} Linear projects with leads`)
+              } catch (err) {
+                core.warning(`Could not fetch Linear projects: ${err.message}`)
+              }
+            }
+
+            /**
+             * Calls Claude Haiku to resolve the best assignee for a repo.
+             * When knownGithubHandle is provided (e.g. from an existing PR),
+             * it is passed as a hint for a more confident match.
+             * Returns { linearUserId, githubHandle, fullName } or a fallback.
+             */
+            async function resolveAssignee(repoName, knownGithubHandle = null) {
+              const { ANTHROPIC_API_KEY, LINEAR_FALLBACK_ASSIGNEE_ID } = process.env
+              const fallback = {
+                linearUserId: LINEAR_FALLBACK_ASSIGNEE_ID || null,
+                githubHandle: 'justanothersynth',
+                fullName: 'Nauras Jabari'
+              }
+
+              if (!ANTHROPIC_API_KEY || !projectMappingMd || !personReferenceMd) {
+                core.info(`${repoName}: skipping LLM assignment — missing API key or reference data`)
+                return fallback
+              }
+
+              try {
+                const hintBlock = knownGithubHandle
+                  ? [`\nThe PR is currently assigned to GitHub handle "${knownGithubHandle}". Look this person up in the Person Reference Table and return their details.\n`]
+                  : []
+
+                const res = await fetch('https://api.anthropic.com/v1/messages', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': ANTHROPIC_API_KEY,
+                    'anthropic-version': '2023-06-01'
+                  },
+                  body: JSON.stringify({
+                    model: 'claude-haiku-4-5-20251001',
+                    max_tokens: 256,
+                    output_config: {
+                      format: {
+                        type: 'json_schema',
+                        schema: {
+                          type: 'object',
+                          properties: {
+                            linearUserId: { type: ['string', 'null'] },
+                            githubHandle: { type: ['string', 'null'] },
+                            fullName: { type: ['string', 'null'] }
+                          },
+                          required: ['linearUserId', 'githubHandle', 'fullName'],
+                          additionalProperties: false
+                        }
+                      }
+                    },
+                    messages: [{
+                      role: 'user',
+                      content: [
+                        `Given the GitHub repo "${repoName}", determine who should be assigned to review a dependabot config sync PR.`,
+                        '',
+                        ...hintBlock,
+                        'Steps:',
+                        '1. Find the Linear Project for this repo using the GitHub Repo Mapping table',
+                        '2. Find that project\'s lead in the Linear Project Leads data',
+                        '3. Match the lead to a person in the Person Reference Table',
+                        '4. Return their Linear User ID, GitHub Handle, and full Name',
+                        '',
+                        '## Linear Project Leads',
+                        JSON.stringify(linearProjects, null, 2),
+                        '',
+                        '## GitHub Repo Mapping + Project Keywords',
+                        projectMappingMd,
+                        '',
+                        '## Person Reference Table',
+                        personReferenceMd,
+                        '',
+                        'Return the Linear User ID, GitHub Handle, and full Name of the best assignee.',
+                        'If no confident match can be made, return null for all fields.'
+                      ].join('\n')
+                    }]
+                  })
+                })
+
+                const result = await res.json()
+                if (result.error) {
+                  core.warning(`${repoName}: Anthropic API error — ${result.error.message}`)
+                  return fallback
+                }
+
+                const parsed = JSON.parse(result.content[0].text)
+                if (parsed.linearUserId && parsed.githubHandle) {
+                  core.info(`${repoName}: LLM assigned to ${parsed.fullName} / ${parsed.githubHandle} (${parsed.linearUserId})`)
+                  return parsed
+                }
+
+                core.info(`${repoName}: LLM returned null — using fallback assignee`)
+                return fallback
+              } catch (err) {
+                core.warning(`${repoName}: assignee resolution failed — ${err.message}`)
+                return fallback
+              }
+            }
+
+            /** Creates a Linear issue and returns { identifier, url } or null. */
+            async function createLinearTicket(repoName, assigneeId) {
+              const { LINEAR_API_KEY, LINEAR_TEAM_ID, LINEAR_PROJECT_ID, LINEAR_STATE_ID, LINEAR_LABEL_ID } = process.env
+              if (!LINEAR_API_KEY || !LINEAR_TEAM_ID) return null
+
+              const description = [
+                `The [dependabot config sync workflow](${workflowUrl}) for Python repos detected that **${repoName}**'s \`.github/dependabot.yml\` was either missing or out of date with the [org template](${templateUrl}), and opened a PR to bring it in line.`,
+                '',
+                '### What to do',
+                '1. Review the PR and confirm the dependabot config looks correct for this repo',
+                '2. Merge when ready',
+                '3. If this repo needs a custom config or should be excluded from syncing, let @naurasj know',
+                '',
+                '> The corresponding PR is auto-linked to this ticket.'
+              ].join('\n')
+
+              const res = await fetch('https://api.linear.app/graphql', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': LINEAR_API_KEY
+                },
+                body: JSON.stringify({
+                  query: `mutation($input: IssueCreateInput!) {
+                    issueCreate(input: $input) { success issue { identifier url } }
+                  }`,
+                  variables: {
+                    input: {
+                      title: `Dependabot config sync — review PR for ${repoName}`,
+                      description,
+                      teamId: LINEAR_TEAM_ID,
+                      priority: 1,
+                      ...(LINEAR_PROJECT_ID && { projectId: LINEAR_PROJECT_ID }),
+                      ...(LINEAR_STATE_ID && { stateId: LINEAR_STATE_ID }),
+                      ...(assigneeId && { assigneeId }),
+                      ...(LINEAR_LABEL_ID && { labelIds: [LINEAR_LABEL_ID] })
+                    }
+                  }
+                })
+              })
+
+              const { data } = await res.json()
+              if (!data?.issueCreate?.success) {
+                core.warning(`${repoName}: Linear ticket creation failed`)
+                return null
+              }
+
+              const ticket = data.issueCreate.issue
+              core.info(`${repoName}: created Linear ticket ${ticket.identifier} — ${ticket.url}`)
+              return { identifier: ticket.identifier, url: ticket.url }
+            }
+
             const repos = await github.paginate(github.rest.repos.listForOrg, {
               org,
               type: 'all',
@@ -55,6 +257,7 @@ jobs:
             })
 
             const opened = []
+            const pending = []
             const skipped = []
             const upToDate = []
             const errors = []
@@ -108,7 +311,66 @@ jobs:
                 })
 
                 if (existingPRs.length > 0) {
-                  core.info(`${name}: open sync PR already exists — ${existingPRs[0].html_url}`)
+                  const pr = existingPRs[0]
+                  const openedDate = new Date(pr.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+
+                  const ticketMatch = pr.body?.match(/Resolves (AMR-\d+)/)
+                  const ticketId = ticketMatch ? ticketMatch[1] : null
+                  const ticketUrl = ticketId ? `https://linear.app/amera/issue/${ticketId}` : null
+
+                  const prAssigneeHandle = pr.assignees?.[0]?.login ?? null
+                  const assignee = await resolveAssignee(name, prAssigneeHandle)
+
+                  if (!prAssigneeHandle && assignee.githubHandle) {
+                    try {
+                      await github.rest.issues.addAssignees({
+                        owner: org, repo: name, issue_number: pr.number,
+                        assignees: [assignee.githubHandle]
+                      })
+                      await github.rest.pulls.requestReviewers({
+                        owner: org, repo: name, pull_number: pr.number,
+                        reviewers: [assignee.githubHandle]
+                      })
+                      core.info(`${name}: retried assignment — assigned to ${assignee.githubHandle}`)
+                    } catch (err) {
+                      core.warning(`${name}: retry assignment failed — ${err.message}`)
+                    }
+                  }
+
+                  const pendingEntry = {
+                    name, prUrl: pr.html_url, prNumber: pr.number,
+                    ticketId, ticketUrl, openedDate,
+                    assigneeName: assignee.fullName ?? null
+                  }
+
+                  let prBranchContent = null
+                  let prBranchFileSha = null
+                  try {
+                    const { data } = await github.rest.repos.getContent({
+                      owner: org, repo: name, path: targetPath, ref: branch
+                    })
+                    prBranchContent = Buffer.from(data.content, 'base64').toString('utf8')
+                    prBranchFileSha = data.sha
+                  } catch {
+                    // file doesn't exist on PR branch
+                  }
+
+                  if (prBranchContent === template) {
+                    pending.push(pendingEntry)
+                    core.info(`${name}: open sync PR already up to date`)
+                    continue
+                  }
+
+                  await github.rest.repos.createOrUpdateFileContents({
+                    owner: org, repo: name, path: targetPath,
+                    message: 'chore: update dependabot config to latest org template',
+                    content: templateB64,
+                    branch,
+                    ...(prBranchFileSha && { sha: prBranchFileSha })
+                  })
+
+                  pending.push(pendingEntry)
+                  core.info(`${name}: pushed updated template to existing PR — ${pr.html_url}`)
                   continue
                 }
 
@@ -161,16 +423,51 @@ jobs:
                   ...(fileSha && { sha: fileSha })
                 })
 
+                const assignee = await resolveAssignee(name)
+                const ticket = await createLinearTicket(name, assignee.linearUserId)
+
+                const prBody = [
+                  `The [dependabot config sync workflow](${workflowUrl}) for Python repos detected that **${name}**'s \`.github/dependabot.yml\` was either missing or out of date with the [org template](${templateUrl}), and opened a PR to bring it in line.`,
+                  '',
+                  '### What to do',
+                  '1. Review the dependabot config and confirm it looks correct for this repo',
+                  '2. Merge when ready',
+                  '3. If this repo needs a custom config or should be excluded from syncing, let @justanothersynth know',
+                  ...(ticket ? ['', `Resolves ${ticket.identifier}`] : [])
+                ].join('\n')
+
                 const { data: pr } = await github.rest.pulls.create({
                   owner: org,
                   repo: name,
                   title: prTitle,
-                  body: 'Synced from the org-level [`dependabot-python-template.yml`](https://github.com/amera-apps/.github/blob/main/.github/dependabot-python-template.yml).\n\nThis configures Dependabot with CodeArtifact registry credentials and enables weekly updates for pip, Docker, and GitHub Actions ecosystems.',
+                  body: prBody,
                   head: branch,
                   base: repo.default_branch
                 })
 
-                opened.push({ name, url: pr.html_url })
+                if (assignee.githubHandle) {
+                  try {
+                    await github.rest.issues.addAssignees({
+                      owner: org, repo: name, issue_number: pr.number,
+                      assignees: [assignee.githubHandle]
+                    })
+                    await github.rest.pulls.requestReviewers({
+                      owner: org, repo: name, pull_number: pr.number,
+                      reviewers: [assignee.githubHandle]
+                    })
+                  } catch (err) {
+                    core.warning(`${name}: could not assign ${assignee.githubHandle} — ${err.message}`)
+                  }
+                }
+
+                opened.push({
+                  name,
+                  prUrl: pr.html_url,
+                  prNumber: pr.number,
+                  ticketId: ticket?.identifier ?? null,
+                  ticketUrl: ticket?.url ?? null,
+                  assigneeName: assignee.fullName ?? null
+                })
                 core.info(`${name}: opened PR — ${pr.html_url}`)
               } catch (err) {
                 errors.push({ name, error: err.message })
@@ -178,52 +475,64 @@ jobs:
               }
             }
 
-            const summary = { opened, skipped, upToDate, errors }
+            const summary = { opened, pending, skipped, upToDate, errors }
             core.setOutput('summary', JSON.stringify(summary))
             core.setOutput('opened_count', opened.length)
-            core.setOutput('slack_text', opened.map(o => `- <${o.url}|${o.name}>`).join('\n'))
 
-            core.info(`Done. Opened: ${opened.length}, Up-to-date: ${upToDate.length}, Skipped: ${skipped.length}, Errors: ${errors.length}`)
+            // ── Build Slack message ────────────────────────────────────────
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+
+            function formatRepoLine({ name, prUrl, prNumber, ticketId, ticketUrl, openedDate, assigneeName }) {
+              let line = `• *${name}* — <${prUrl}|PR #${prNumber}>`
+              if (ticketId && ticketUrl) line += ` — <${ticketUrl}|${ticketId}>`
+              if (assigneeName) line += ` — ${assigneeName}`
+              if (openedDate) line += ` (opened ${openedDate})`
+              return line
+            }
+
+            const lines = []
+
+            if (opened.length > 0) {
+              const s = opened.length === 1 ? '' : 's'
+              const verb = opened.length === 1 ? 'its' : 'their'
+              lines.push(`🔄 *\`dependabot.yml\` sync service* — I just reviewed all our Python repos and opened ${opened.length} new PR${s} to sync ${verb} dependabot config with the org template.`)
+              lines.push('')
+              lines.push('*Newly opened:*')
+              for (const o of opened) lines.push(formatRepoLine(o))
+            }
+
+            if (pending.length > 0) {
+              if (opened.length > 0) {
+                lines.push('')
+                lines.push('*Still awaiting merge:*')
+              } else {
+                lines.push('🔄 *`dependabot.yml` sync service* — I just reviewed all our Python repos — everything is in sync, but some PRs from previous runs are still awaiting merge:')
+                lines.push('')
+              }
+              for (const p of pending) lines.push(formatRepoLine(p))
+            }
+
+            if (lines.length > 0) {
+              lines.push('')
+              lines.push(`<${runUrl}|View workflow run>`)
+            }
+
+            core.setOutput('slack_text', lines.join('\n'))
+            core.setOutput('should_post_slack', lines.length > 0)
+
+            core.info(`Done. Opened: ${opened.length}, Pending: ${pending.length}, Up-to-date: ${upToDate.length}, Skipped: ${skipped.length}, Errors: ${errors.length}`)
 
       - name: Post Slack summary
         if: >-
           always()
+          && steps.sync.outputs.should_post_slack == 'true'
           && (vars.SLACK_DEPENDABOT_ALERTS_CHANNEL_ID != '')
-        uses: slackapi/slack-github-action@v2
+        uses: slackapi/slack-github-action@v3
         with:
           method: chat.postMessage
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             channel: ${{ vars.SLACK_DEPENDABOT_ALERTS_CHANNEL_ID }}
-            text: "🔄 Dependabot config sync completed.${{ fromJSON(steps.sync.outputs.opened_count) > 0 && format(' PRs opened:\n{0}', steps.sync.outputs.slack_text) || ' All repos are up to date — no PRs opened.' }}\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
-
-      - name: Create Linear tickets
-        if: >-
-          always()
-          && fromJSON(steps.sync.outputs.opened_count) > 0
-          && (vars.LINEAR_AMERA_TEAM_ID != '')
-        run: |
-          SUMMARY='${{ steps.sync.outputs.summary }}'
-
-          # One ticket per repo, landed in Triage for assignment
-          echo "$SUMMARY" | jq -c '.opened[]' | while read -r item; do
-            REPO=$(echo "$item" | jq -r '.name')
-            PR_URL=$(echo "$item" | jq -r '.url')
-
-            curl -s -X POST https://api.linear.app/graphql \
-              -H "Content-Type: application/json" \
-              -H "Authorization: $LINEAR_API_KEY" \
-              -d "$(jq -n \
-                --arg title "Dependabot config sync — review PR for $REPO" \
-                --arg desc "The daily [dependabot config sync](https://github.com/amera-apps/.github/blob/main/.github/workflows/sync_dependabot_python.yml) workflow detected that **${REPO}**'s \`.github/dependabot.yml\` was either missing or out of date with the [org template](https://github.com/amera-apps/.github/blob/main/.github/dependabot-python-template.yml), and opened a PR to bring it in line.\n\n**PR:** ${PR_URL}\n\n### What to do\n1. Review the PR and confirm the dependabot config looks correct for this repo\n2. Merge when ready\n3. If this repo needs a custom config or should be excluded from syncing, let @naurasj know" \
-                --arg team "$LINEAR_TEAM_ID" \
-                --arg project "$LINEAR_PROJECT_ID" \
-                --arg state "$LINEAR_TRIAGE_STATE_ID" \
-                '{ query: "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { url } } }", variables: { input: { title: $title, description: $desc, teamId: $team, projectId: $project, stateId: $state } } }'
-              )"
-          done
-        env:
-          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
-          LINEAR_TEAM_ID: ${{ vars.LINEAR_AMERA_TEAM_ID }}
-          LINEAR_PROJECT_ID: ${{ vars.LINEAR_DEPENDABOT_ALERTS_PROJECT_ID }}
-          LINEAR_TRIAGE_STATE_ID: ${{ vars.LINEAR_TRIAGE_STATE_ID }}
+            text: ${{ toJSON(steps.sync.outputs.slack_text) }}
+            unfurl_links: false
+            unfurl_media: false

@@ -1,6 +1,14 @@
-# Dependabot configuration synced from amera-apps/.github.
-# Do not edit in individual repos — changes will be overwritten
-# by the sync_dependabot_python workflow.
+# Dependabot configuration for Python repos — tells GitHub's Dependabot how
+# to check for dependency updates across pip, Docker, and GitHub Actions
+# ecosystems. Includes credentials for our private CodeArtifact registry so
+# Dependabot can resolve internal packages (e.g. amera-core) when opening
+# automated fix and version bump PRs.
+#
+# This file is synced from the org template at amera-apps/.github.
+# ❗ DO NOT edit directly — changes will be overwritten by the next sync run.
+# To update, edit the template and let it propagate:
+# https://github.com/amera-apps/.github/blob/main/.github/dependabot-python-template.yml
+# If you're unsure, reach out to nauras@amerahealthsolutions.com (@justanothersynth)
 
 version: 2
 

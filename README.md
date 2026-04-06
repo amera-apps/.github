@@ -88,6 +88,9 @@ graph TD
 |---|---|
 | `AMERABOT_APP_ID` | GitHub App ID |
 | `AMERABOT_APP_PRIVATE_KEY` | GitHub App private key |
+| `LINEAR_API_KEY` | Linear API key (used by `sync_dependabot_python` to create tickets) |
+| `SLACK_BOT_TOKEN` | Slack Bot User OAuth Token (used by `sync_dependabot_python` to post summaries) |
+| `ANTHROPIC_API_KEY` | Anthropic API key (used by `sync_dependabot_python` for LLM-based assignee resolution) |
 | `AWS_ACCESS_KEY_ID` | IAM user for CodeArtifact token generation |
 | `AWS_SECRET_ACCESS_KEY` | IAM user for CodeArtifact token generation |
 
@@ -98,9 +101,11 @@ The AWS IAM user should have minimal permissions: `codeartifact:GetAuthorization
 | Variable | Description |
 |---|---|
 | `SLACK_DEPENDABOT_ALERTS_CHANNEL_ID` | Slack channel (used by `sync_dependabot_python`) |
-| `LINEAR_AMERA_TEAM_ID` | Linear team (used by `sync_dependabot_python`) |
-| `LINEAR_DEPENDABOT_ALERTS_PROJECT_ID` | Linear project (used by `sync_dependabot_python`) |
-| `LINEAR_TRIAGE_STATE_ID` | Linear "Triage" workflow state — tickets land here for immediate visibility |
+| `LINEAR_TEAM_ID__AMERA` | Linear team (used by `sync_dependabot_python`) |
+| `LINEAR_PROJECT_ID__SOC2_COMPLIANCE` | Linear project (used by `sync_dependabot_python`) |
+| `LINEAR_STATE_ID__TO_DO` | Linear "Todo" workflow state — tickets land here assigned and ready to act on |
+| `LINEAR_PERSON_ID__NAURAS_J` | Linear user ID — fallback assignee when LLM resolution fails |
+| `LINEAR_LABEL_ID__AMERABOT` | Linear label ID — tags tickets as bot-created |
 | `AWS_REGION` | AWS region for CodeArtifact (`us-east-1`) |
 | `AWS_OWNER_ID` | AWS account ID / domain owner (`371568547021`) |
 
@@ -141,19 +146,29 @@ graph TD
     Check -->|"yes + out of date"| PR["Open PR:\nchore/sync-dependabot-config"]
     Check -->|"no or up-to-date"| Skip[Skip]
     PR --> Slack["Slack summary"]
-    PR --> Linear["Linear ticket per repo\n(Triage)"]
+    PR --> Linear["Linear ticket per repo\n(Todo, assigned)"]
 ```
 
-**How it works:**
+**Per-repo decision flow:**
 
-1. Lists all repos in the org
-2. For each non-archived repo, checks if `pyproject.toml` exists
-3. Compares the repo's `.github/dependabot.yml` to the template — skips if already matching
-4. Skips if an open sync PR already exists from a previous run
-5. Creates a branch, commits the template, and opens a PR
-6. After processing all repos, posts a Slack summary and creates one Linear ticket per repo (in Triage) for each PR opened
+```mermaid
+flowchart TD
+    checkTemplate{Default branch matches template?}
+    checkTemplate -->|Yes| upToDate[Skip — up to date]
+    checkTemplate -->|No| checkPR{Open sync PR exists?}
+    checkPR -->|No| createNew[Create branch + commit + Linear ticket + PR]
+    checkPR -->|Yes| checkPRContent{PR branch matches template?}
+    checkPRContent -->|Yes| skipPending[Skip — add to pending]
+    checkPRContent -->|No| pushUpdate[Push updated commit to PR branch, add to pending]
+```
+
+After processing all repos, posts a Slack summary and creates one Linear ticket per repo for each new PR opened.
 
 PRs are opened (not direct pushes) to comply with branch protection rules requiring at least one approving review.
+
+#### Auto-assignment
+
+Each new PR and Linear ticket is automatically assigned to the project lead inferred via an LLM (Claude Haiku). The workflow fetches [`project-mapping.md`](https://github.com/amera-apps/.cursor/blob/main/skills/amera-index/references/project-mapping.md) and [`person-reference.md`](https://github.com/amera-apps/.cursor/blob/main/skills/amera-index/references/person-reference.md) from the `.cursor` repo, queries Linear for project leads, and passes all three data sources to Claude to resolve the best assignee for each repo. If no confident match is found or the `ANTHROPIC_API_KEY` secret is not set, assignment falls back to `LINEAR_PERSON_ID__NAURAS_J`.
 
 #### Skipping repos
 
@@ -173,3 +188,5 @@ To change the Dependabot config across all repos:
 2. Merge to `main`
 3. Wait for the next scheduled sync or trigger manually via `workflow_dispatch`
 4. Review and merge the PRs opened in each repo
+
+If repos already have open sync PRs from a previous run, the workflow pushes an updated commit to those PRs automatically — no need to close and re-run.
