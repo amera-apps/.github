@@ -38,6 +38,9 @@ on:
         type: string
         description: 'GitHub Dependabot alert URL'
 
+permissions:
+  contents: read
+
 concurrency:
   group: auto-fix-${{ inputs.target_repo }}-${{ inputs.ghsa_ids }}
   cancel-in-progress: false
