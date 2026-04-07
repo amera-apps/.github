@@ -3,6 +3,12 @@
 # Automatically fixes transitive dependency vulnerabilities by updating
 # the lockfile and opening a PR in the affected repo. Triggered by the
 # amera-dependabot Lambda when it classifies an alert as fixable_manual.
+#
+# Flow: Lambda dispatches → this workflow checks out the target repo →
+# updates the vulnerable package(s) → opens a PR with the lockfile diff.
+# If a PR for the same GHSA already exists, create-pull-request will
+# force-push to the existing branch and update the PR rather than
+# creating a duplicate.
 
 name: Auto-fix transitive dependency
 
@@ -38,18 +44,26 @@ on:
         type: string
         description: 'GitHub Dependabot alert URL'
 
+# Minimal permissions — the app token provides write access to the target repo.
 permissions:
   contents: read
 
+# Prevent duplicate runs for the same repo + advisory. cancel-in-progress
+# is false so a queued run still executes (the alert may have changed).
 concurrency:
   group: auto-fix-${{ inputs.target_repo }}-${{ inputs.ghsa_ids }}
   cancel-in-progress: false
 
 jobs:
+  # ═══════════════════════════════════════════════════════════════════════
+  # Python (Poetry) job
+  # ═══════════════════════════════════════════════════════════════════════
   fix-python:
     if: inputs.ecosystem == 'pip'
     runs-on: ubuntu-latest
     steps:
+      # Scoped app token — only grants access to the specific target repo,
+      # not the entire org. Used for checkout, PR creation, and gh CLI calls.
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -59,12 +73,22 @@ jobs:
           owner: amera-apps
           repositories: ${{ inputs.target_repo }}
 
+      # Checks out the target repo's default branch — not this (.github) repo.
+      # The app token is required for push access when create-pull-request
+      # commits changes later.
       - name: Checkout target repo
         uses: actions/checkout@v5
         with:
           repository: amera-apps/${{ inputs.target_repo }}
           token: ${{ steps.app-token.outputs.token }}
 
+      # Reads Python and Poetry version requirements from the target repo's
+      # pyproject.toml BEFORE setting up the toolchain. Uses the runner's
+      # system Python (3.12 on ubuntu-24.04) which has tomllib built in.
+      # Outputs:
+      #   python-version  — major.minor extracted from requires-python or
+      #                      tool.poetry.dependencies.python (fallback: 3.11)
+      #   poetry-constraint — raw requires-poetry value for pipx install
       - name: Detect project requirements
         id: project-meta
         run: |
@@ -86,11 +110,18 @@ jobs:
               f.write(f'poetry-constraint={poetry}\n')
           "
 
+      # Installs the exact Python version the target repo requires.
+      # Without this, Poetry will refuse to resolve dependencies if the
+      # running Python falls outside the project's requires-python range.
       - name: Setup Python
         uses: actions/setup-python@v6
         with:
           python-version: ${{ steps.project-meta.outputs.python-version }}
 
+      # Installs the Poetry version the target repo expects. The constraint
+      # may be a bare version ("2.2.1") or a PEP 440 range (">=2.2,<2.3").
+      # Bare versions get a == prefix so pipx resolves them correctly
+      # (e.g. "poetry==2.2.1" instead of the malformed "poetry2.2.1").
       - name: Install Poetry
         run: |
           CONSTRAINT="${{ steps.project-meta.outputs.poetry-constraint }}"
@@ -103,6 +134,9 @@ jobs:
             pipx install poetry
           fi
 
+      # AWS credentials are needed to fetch a CodeArtifact auth token for
+      # our private PyPI registry. These are org-level secrets shared by
+      # all workflow runs.
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
@@ -110,6 +144,8 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION }}
 
+      # Short-lived token for our private PyPI registry on CodeArtifact.
+      # Masked in logs to prevent accidental exposure.
       - name: Get CodeArtifact token
         id: ca
         shell: bash
@@ -123,6 +159,10 @@ jobs:
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
+      # Only adds the CodeArtifact source if it's not already configured in
+      # the repo's pyproject.toml. This avoids overwriting the repo's chosen
+      # priority (e.g. "explicit") with our default "supplemental", which
+      # would cause an unintended pyproject.toml diff in the PR.
       - name: Authenticate Poetry
         run: |
           if ! poetry source show codeartifact &>/dev/null; then
@@ -138,9 +178,17 @@ jobs:
       - name: Sync lockfile
         run: poetry lock --no-interaction
 
+      # Full install so the virtualenv is consistent before we do a targeted
+      # update. Required for `poetry show` to report accurate current versions.
       - name: Install dependencies
         run: poetry install --no-interaction
 
+      # Core step: snapshots current versions, runs the targeted update, then
+      # checks if the lockfile actually changed. If it did, builds a markdown
+      # version table (Before → After) for the PR description.
+      # Outputs:
+      #   changed       — "true" if poetry.lock was modified
+      #   version_table — markdown table of package version changes
       - name: Update vulnerable packages
         id: update
         env:
@@ -179,6 +227,9 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
+      # Best-effort vulnerability scan after the update. continue-on-error
+      # ensures a pip-audit failure (e.g. remaining vulns in other packages)
+      # doesn't block the PR — the goal is visibility, not gating.
       - name: Verify fix with pip-audit
         if: steps.update.outputs.changed == 'true'
         continue-on-error: true
@@ -186,6 +237,9 @@ jobs:
           pip install pip-audit
           pip-audit --no-require-hashes --progress-spinner off
 
+      # Opens a PR (or updates the existing one if the fix/$GHSA branch
+      # already exists). create-pull-request handles branch creation,
+      # committing the lockfile changes, and force-pushing if needed.
       - name: Create PR
         if: steps.update.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v8
@@ -221,6 +275,9 @@ jobs:
             dependencies
             security
 
+      # Many repos use a staging branch as the merge target instead of main.
+      # If staging exists, retarget the PR so it merges there. Fails silently
+      # if staging doesn't exist (the PR stays targeted at the default branch).
       - name: Retarget to staging
         if: steps.create-pr.outputs.pull-request-number
         continue-on-error: true
@@ -235,6 +292,9 @@ jobs:
             echo "Retargeted PR to staging"
           fi
 
+      # Placeholder for LLM-powered assignee resolution. Will use the same
+      # resolveAssignee pattern from sync_dependabot_python.yml to look up
+      # the project lead via amera-index reference data and Claude Haiku.
       - name: Resolve assignee and assign
         if: steps.create-pr.outputs.pull-request-number
         continue-on-error: true
@@ -243,10 +303,16 @@ jobs:
         run: |
           echo "TODO: assignee resolution — reuse resolveAssignee logic from sync_dependabot_python.yml"
 
+  # ═══════════════════════════════════════════════════════════════════════
+  # npm job — mirrors the Python job structure but uses npm tooling.
+  # No private registry or lockfile sync needed; npm update handles
+  # everything in one step.
+  # ═══════════════════════════════════════════════════════════════════════
   fix-npm:
     if: inputs.ecosystem == 'npm'
     runs-on: ubuntu-latest
     steps:
+      # Same scoped app token pattern as the Python job.
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -262,6 +328,10 @@ jobs:
           repository: amera-apps/${{ inputs.target_repo }}
           token: ${{ steps.app-token.outputs.token }}
 
+      # Reads the Node version from the target repo. Checks .nvmrc and
+      # .node-version first (explicit pinning), then falls back to the
+      # engines.node field in package.json. Defaults to 20 (current LTS)
+      # if none are found.
       - name: Detect Node version
         id: node-meta
         run: |
@@ -289,6 +359,9 @@ jobs:
         with:
           node-version: ${{ steps.node-meta.outputs.version }}
 
+      # Same snapshot-update-diff pattern as the Python job.
+      # Uses `npm list --json` to read versions before/after since npm
+      # doesn't have a `poetry show`-style command for single packages.
       - name: Update vulnerable packages
         id: update
         env:
@@ -335,6 +408,7 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
+      # Best-effort audit — same rationale as pip-audit above.
       - name: Verify fix with npm audit
         if: steps.update.outputs.changed == 'true'
         continue-on-error: true
@@ -375,6 +449,7 @@ jobs:
             dependencies
             security
 
+      # Same staging retarget logic as the Python job.
       - name: Retarget to staging
         if: steps.create-pr.outputs.pull-request-number
         continue-on-error: true
