@@ -146,6 +146,12 @@ jobs:
         env:
           PACKAGES: ${{ inputs.packages }}
         run: |
+          BEFORE=""
+          for pkg in $PACKAGES; do
+            ver=$(poetry show "$pkg" 2>/dev/null | awk '/version/{print $NF; exit}') || ver="(not installed)"
+            BEFORE="$BEFORE$pkg=$ver "
+          done
+
           echo "::group::poetry update output"
           poetry update $PACKAGES --no-interaction 2>&1 | tee /tmp/update_output.txt
           echo "::endgroup::"
@@ -155,6 +161,22 @@ jobs:
             echo "::notice::No lockfile changes — package may already be up to date"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
+
+            CHANGES=""
+            for entry in $BEFORE; do
+              pkg="${entry%%=*}"
+              old_ver="${entry#*=}"
+              new_ver=$(poetry show "$pkg" 2>/dev/null | awk '/version/{print $NF; exit}') || new_ver="unknown"
+              CHANGES="$CHANGES| \`$pkg\` | $old_ver | $new_ver |"$'\n'
+            done
+
+            {
+              echo "version_table<<EOF"
+              echo "| Package | Before | After |"
+              echo "|---------|--------|-------|"
+              echo -n "$CHANGES"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - name: Verify fix with pip-audit
@@ -179,6 +201,10 @@ jobs:
             Automated fix for a **${{ inputs.severity }}**-severity transitive dependency vulnerability.
 
             Updates `${{ inputs.packages }}` to resolve [${{ inputs.ghsa_ids }}](https://github.com/advisories/${{ inputs.ghsa_ids }}).
+
+            ### Version changes
+
+            ${{ steps.update.outputs.version_table }}
 
             **Opened by:** [amera-dependabot](https://github.com/amera-apps/infra/tree/main/aws/lambda/amera-dependabot) via [auto-fix workflow](https://github.com/amera-apps/.github/blob/main/.github/workflows/auto_fix_transitive_dep.yml)
             ${{ inputs.alert_url && format('**Alert:** {0}', inputs.alert_url) || '' }}
@@ -268,6 +294,17 @@ jobs:
         env:
           PACKAGES: ${{ inputs.packages }}
         run: |
+          BEFORE=""
+          for pkg in $PACKAGES; do
+            ver=$(npm list "$pkg" --depth=0 --json 2>/dev/null | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          deps = data.get('dependencies', {})
+          print(deps.get('$pkg', {}).get('version', '(not installed)'))
+          " 2>/dev/null) || ver="(not installed)"
+            BEFORE="$BEFORE$pkg=$ver "
+          done
+
           npm update $PACKAGES
 
           if git diff --quiet package-lock.json; then
@@ -275,6 +312,27 @@ jobs:
             echo "::notice::No lockfile changes — package may already be up to date"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
+
+            CHANGES=""
+            for entry in $BEFORE; do
+              pkg="${entry%%=*}"
+              old_ver="${entry#*=}"
+              new_ver=$(npm list "$pkg" --depth=0 --json 2>/dev/null | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          deps = data.get('dependencies', {})
+          print(deps.get('$pkg', {}).get('version', 'unknown'))
+          " 2>/dev/null) || new_ver="unknown"
+              CHANGES="$CHANGES| \`$pkg\` | $old_ver | $new_ver |"$'\n'
+            done
+
+            {
+              echo "version_table<<EOF"
+              echo "| Package | Before | After |"
+              echo "|---------|--------|-------|"
+              echo -n "$CHANGES"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - name: Verify fix with npm audit
@@ -297,6 +355,10 @@ jobs:
             Automated fix for a **${{ inputs.severity }}**-severity transitive dependency vulnerability.
 
             Updates `${{ inputs.packages }}` to resolve [${{ inputs.ghsa_ids }}](https://github.com/advisories/${{ inputs.ghsa_ids }}).
+
+            ### Version changes
+
+            ${{ steps.update.outputs.version_table }}
 
             **Opened by:** [amera-dependabot](https://github.com/amera-apps/infra/tree/main/aws/lambda/amera-dependabot) via [auto-fix workflow](https://github.com/amera-apps/.github/blob/main/.github/workflows/auto_fix_transitive_dep.yml)
             ${{ inputs.alert_url && format('**Alert:** {0}', inputs.alert_url) || '' }}
