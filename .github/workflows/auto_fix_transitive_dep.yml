@@ -205,10 +205,10 @@ jobs:
         env:
           PACKAGES: ${{ inputs.packages }}
         run: |
-          BEFORE=""
+          declare -A BEFORE_VERS
           for pkg in $PACKAGES; do
-            ver=$(poetry show "$pkg" 2>/dev/null | awk '/version/{print $NF; exit}') || ver="(not installed)"
-            BEFORE="$BEFORE$pkg=$ver "
+            ver=$(poetry show "$pkg" 2>/dev/null | awk '/version/{print $NF; exit}') || ver="not-installed"
+            BEFORE_VERS["$pkg"]="$ver"
           done
 
           echo "::group::poetry update output"
@@ -222,13 +222,16 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
 
             CHANGES=""
-            for entry in $BEFORE; do
-              pkg="${entry%%=*}"
-              old_ver="${entry#*=}"
+            SUMMARY_PARTS=""
+            for pkg in "${!BEFORE_VERS[@]}"; do
+              old_ver="${BEFORE_VERS[$pkg]}"
               new_ver=$(poetry show "$pkg" 2>/dev/null | awk '/version/{print $NF; exit}') || new_ver="unknown"
               CHANGES="$CHANGES| \`$pkg\` | $old_ver | $new_ver |"$'\n'
+              if [ -n "$SUMMARY_PARTS" ]; then SUMMARY_PARTS="$SUMMARY_PARTS, "; fi
+              SUMMARY_PARTS="$SUMMARY_PARTS$pkg [$old_ver -> $new_ver]"
             done
 
+            echo "version_summary=$SUMMARY_PARTS" >> "$GITHUB_OUTPUT"
             {
               echo "version_table<<EOF"
               echo "| Package | Before | After |"
@@ -258,8 +261,8 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           branch: fix/${{ inputs.ghsa_ids }}
-          commit-message: 'fix: update ${{ inputs.packages }} to resolve ${{ inputs.ghsa_ids }}'
-          title: 'fix: update ${{ inputs.packages }} (${{ inputs.ghsa_ids }})'
+          commit-message: 'fix: update ${{ steps.update.outputs.version_summary }} (${{ inputs.ghsa_ids }})'
+          title: 'fix: update ${{ steps.update.outputs.version_summary }} (${{ inputs.ghsa_ids }})'
           body: |
             ## Summary
 
@@ -441,15 +444,22 @@ jobs:
         env:
           PACKAGES: ${{ inputs.packages }}
         run: |
-          BEFORE=""
+          declare -A BEFORE_VERS
           for pkg in $PACKAGES; do
-            ver=$(npm list "$pkg" --depth=0 --json 2>/dev/null | python3 -c "
+            ver=$(npm list "$pkg" --all --json 2>/dev/null | python3 -c "
           import json, sys
-          data = json.load(sys.stdin)
-          deps = data.get('dependencies', {})
-          print(deps.get('$pkg', {}).get('version', '(not installed)'))
-          " 2>/dev/null) || ver="(not installed)"
-            BEFORE="$BEFORE$pkg=$ver "
+          def find(node, name):
+              deps = node.get('dependencies', {})
+              if name in deps:
+                  return deps[name].get('version', '')
+              for child in deps.values():
+                  v = find(child, name)
+                  if v:
+                      return v
+              return ''
+          print(find(json.load(sys.stdin), '$pkg') or 'not-installed')
+          " 2>/dev/null) || ver="not-installed"
+            BEFORE_VERS["$pkg"]="$ver"
           done
 
           npm update $PACKAGES
@@ -461,18 +471,28 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
 
             CHANGES=""
-            for entry in $BEFORE; do
-              pkg="${entry%%=*}"
-              old_ver="${entry#*=}"
-              new_ver=$(npm list "$pkg" --depth=0 --json 2>/dev/null | python3 -c "
+            SUMMARY_PARTS=""
+            for pkg in "${!BEFORE_VERS[@]}"; do
+              old_ver="${BEFORE_VERS[$pkg]}"
+              new_ver=$(npm list "$pkg" --all --json 2>/dev/null | python3 -c "
           import json, sys
-          data = json.load(sys.stdin)
-          deps = data.get('dependencies', {})
-          print(deps.get('$pkg', {}).get('version', 'unknown'))
+          def find(node, name):
+              deps = node.get('dependencies', {})
+              if name in deps:
+                  return deps[name].get('version', '')
+              for child in deps.values():
+                  v = find(child, name)
+                  if v:
+                      return v
+              return ''
+          print(find(json.load(sys.stdin), '$pkg') or 'unknown')
           " 2>/dev/null) || new_ver="unknown"
               CHANGES="$CHANGES| \`$pkg\` | $old_ver | $new_ver |"$'\n'
+              if [ -n "$SUMMARY_PARTS" ]; then SUMMARY_PARTS="$SUMMARY_PARTS, "; fi
+              SUMMARY_PARTS="$SUMMARY_PARTS$pkg [$old_ver -> $new_ver]"
             done
 
+            echo "version_summary=$SUMMARY_PARTS" >> "$GITHUB_OUTPUT"
             {
               echo "version_table<<EOF"
               echo "| Package | Before | After |"
@@ -500,8 +520,8 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           branch: fix/${{ inputs.ghsa_ids }}
-          commit-message: 'fix: update ${{ inputs.packages }} to resolve ${{ inputs.ghsa_ids }}'
-          title: 'fix: update ${{ inputs.packages }} (${{ inputs.ghsa_ids }})'
+          commit-message: 'fix: update ${{ steps.update.outputs.version_summary }} (${{ inputs.ghsa_ids }})'
+          title: 'fix: update ${{ steps.update.outputs.version_summary }} (${{ inputs.ghsa_ids }})'
           body: |
             ## Summary
 
