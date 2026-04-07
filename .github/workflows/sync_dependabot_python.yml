@@ -35,7 +35,8 @@ jobs:
         id: sync
         uses: actions/github-script@v8
         env:
-          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          LINEAR_OAUTH_CLIENT_ID: ${{ secrets.LINEAR_AMERABOT_OAUTH_CLIENT_ID }}
+          LINEAR_OAUTH_CLIENT_SECRET: ${{ secrets.LINEAR_AMERABOT_OAUTH_CLIENT_SECRET }}
           LINEAR_TEAM_ID: ${{ vars.LINEAR_TEAM_ID__AMERA }}
           LINEAR_PROJECT_ID: ${{ vars.LINEAR_PROJECT_ID__SOC2_COMPLIANCE }}
           LINEAR_STATE_ID: ${{ vars.LINEAR_STATE_ID__TO_DO }}
@@ -61,6 +62,33 @@ jobs:
             const template = fs.readFileSync('.github/dependabot-python-template.yml', 'utf8')
             const templateB64 = Buffer.from(template).toString('base64')
 
+            // ── Linear OAuth token exchange ──────────────────────────────
+            let linearToken = null
+            if (process.env.LINEAR_OAUTH_CLIENT_ID && process.env.LINEAR_OAUTH_CLIENT_SECRET) {
+              try {
+                const tokenRes = await fetch('https://api.linear.app/oauth/token', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                  body: new URLSearchParams({
+                    grant_type: 'client_credentials',
+                    client_id: process.env.LINEAR_OAUTH_CLIENT_ID,
+                    client_secret: process.env.LINEAR_OAUTH_CLIENT_SECRET,
+                    scope: 'read,write,issues:create'
+                  })
+                })
+                const tokenBody = await tokenRes.json()
+                if (tokenBody.access_token) {
+                  linearToken = tokenBody.access_token
+                  core.setSecret(linearToken)
+                  core.info('Fetched Linear OAuth token')
+                } else {
+                  core.warning(`Linear OAuth token fetch failed: ${JSON.stringify(tokenBody)}`)
+                }
+              } catch (err) {
+                core.warning(`Linear OAuth token exchange failed: ${err.message}`)
+              }
+            }
+
             // ── Fetch reference data for auto-assignment ───────────────────
             let projectMappingMd = ''
             let personReferenceMd = ''
@@ -82,13 +110,13 @@ jobs:
             }
 
             let linearProjects = []
-            if (process.env.LINEAR_API_KEY) {
+            if (linearToken) {
               try {
                 const res = await fetch('https://api.linear.app/graphql', {
                   method: 'POST',
                   headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': process.env.LINEAR_API_KEY
+                    'Authorization': `Bearer ${linearToken}`
                   },
                   body: JSON.stringify({
                     query: `{ projects(first: 100) { nodes { name lead { id name displayName email } } } }`
@@ -203,8 +231,8 @@ jobs:
 
             /** Creates a Linear issue and returns { identifier, url } or null. */
             async function createLinearTicket(repoName, assigneeId) {
-              const { LINEAR_API_KEY, LINEAR_TEAM_ID, LINEAR_PROJECT_ID, LINEAR_STATE_ID, LINEAR_LABEL_ID } = process.env
-              if (!LINEAR_API_KEY || !LINEAR_TEAM_ID) return null
+              const { LINEAR_TEAM_ID, LINEAR_PROJECT_ID, LINEAR_STATE_ID, LINEAR_LABEL_ID } = process.env
+              if (!linearToken || !LINEAR_TEAM_ID) return null
 
               const description = [
                 `The [dependabot config sync workflow](${workflowUrl}) for Python repos detected that **${repoName}**'s \`.github/dependabot.yml\` was either missing or out of date with the [org template](${templateUrl}), and opened a PR to bring it in line.`,
@@ -221,7 +249,7 @@ jobs:
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
-                  'Authorization': LINEAR_API_KEY
+                  'Authorization': `Bearer ${linearToken}`
                 },
                 body: JSON.stringify({
                   query: `mutation($input: IssueCreateInput!) {
