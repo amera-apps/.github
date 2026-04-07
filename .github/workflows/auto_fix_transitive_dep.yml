@@ -184,7 +184,7 @@ jobs:
         continue-on-error: true
         run: |
           pip install pip-audit
-          pip-audit --require-hashes=false --progress-spinner=off
+          pip-audit --no-require-hashes --progress-spinner off
 
       - name: Create PR
         if: steps.update.outputs.changed == 'true'
