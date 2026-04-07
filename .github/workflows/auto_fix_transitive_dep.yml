@@ -329,9 +329,9 @@ jobs:
           RESPONSE=$(curl -s https://api.linear.app/graphql \
             -H "Content-Type: application/json" \
             -H "Authorization: $LINEAR_API_KEY" \
-            -d '{"query":"{ issueSearch(filter:{identifier:{eq:\"${{ inputs.linear_ticket }}\"}}) { nodes { id } } }"}')
+            -d '{"query":"{ issue(id:\"${{ inputs.linear_ticket }}\") { id } }"}')
 
-          ISSUE_ID=$(echo "$RESPONSE" | jq -r '.data.issueSearch.nodes[0].id // empty')
+          ISSUE_ID=$(echo "$RESPONSE" | jq -r '.data.issue.id // empty')
 
           if [ -z "$ISSUE_ID" ]; then
             echo "::warning::Could not resolve Linear issue ID for ${{ inputs.linear_ticket }}"
@@ -540,9 +540,9 @@ jobs:
           RESPONSE=$(curl -s https://api.linear.app/graphql \
             -H "Content-Type: application/json" \
             -H "Authorization: $LINEAR_API_KEY" \
-            -d '{"query":"{ issueSearch(filter:{identifier:{eq:\"${{ inputs.linear_ticket }}\"}}) { nodes { id } } }"}')
+            -d '{"query":"{ issue(id:\"${{ inputs.linear_ticket }}\") { id } }"}')
 
-          ISSUE_ID=$(echo "$RESPONSE" | jq -r '.data.issueSearch.nodes[0].id // empty')
+          ISSUE_ID=$(echo "$RESPONSE" | jq -r '.data.issue.id // empty')
 
           if [ -z "$ISSUE_ID" ]; then
             echo "::warning::Could not resolve Linear issue ID for ${{ inputs.linear_ticket }}"
