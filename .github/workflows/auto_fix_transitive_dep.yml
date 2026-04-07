@@ -43,6 +43,14 @@ on:
         required: false
         type: string
         description: 'GitHub Dependabot alert URL'
+      slack_thread_ts:
+        required: false
+        type: string
+        description: 'Slack thread timestamp for posting failure updates in-thread'
+      slack_channel_id:
+        required: false
+        type: string
+        description: 'Slack channel ID where the GHSA thread lives'
 
 # Minimal permissions — the app token provides write access to the target repo.
 permissions:
@@ -303,6 +311,48 @@ jobs:
         run: |
           echo "TODO: assignee resolution — reuse resolveAssignee logic from sync_dependabot_python.yml"
 
+      # TEMPORARY — remove after verifying failure notifications work
+      - name: Force failure (testing)
+        run: exit 1
+
+      # ── Failure / cancellation notifications ──────────────────────────
+      # These steps only run when a previous step failed or the run was
+      # cancelled. They post updates to the existing Slack thread and
+      # Linear ticket — never top-level messages or new tickets.
+
+      - name: Notify Slack (failure)
+        if: (failure() || cancelled()) && inputs.slack_thread_ts
+        uses: slackapi/slack-github-action@v3
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            thread_ts: "${{ inputs.slack_thread_ts }}"
+            text: ":x: Auto-fix workflow failed for `${{ inputs.packages }}` in `${{ inputs.target_repo }}`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
+            unfurl_links: false
+            unfurl_media: false
+
+      - name: Comment on Linear ticket (failure)
+        if: (failure() || cancelled()) && inputs.linear_ticket
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          ISSUE_ID=$(curl -s https://api.linear.app/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $LINEAR_API_KEY" \
+            -d '{"query":"{ issueSearch(filter:{identifier:{eq:\"${{ inputs.linear_ticket }}\"}}) { nodes { id } } }"}' \
+            | jq -r '.data.issueSearch.nodes[0].id // empty')
+
+          if [ -n "$ISSUE_ID" ]; then
+            curl -s https://api.linear.app/graphql \
+              -H "Content-Type: application/json" \
+              -H "Authorization: $LINEAR_API_KEY" \
+              -d "{\"query\":\"mutation { commentCreate(input: { issueId: \\\"$ISSUE_ID\\\", body: \\\"Auto-fix workflow failed for **${{ inputs.target_repo }}** — [view run]($RUN_URL)\\\" }) { success } }\"}"
+          fi
+
   # ═══════════════════════════════════════════════════════════════════════
   # npm job — mirrors the Python job structure but uses npm tooling.
   # No private registry or lockfile sync needed; npm update handles
@@ -471,3 +521,38 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           echo "TODO: assignee resolution — reuse resolveAssignee logic from sync_dependabot_python.yml"
+
+      # ── Failure / cancellation notifications ──────────────────────────
+
+      - name: Notify Slack (failure)
+        if: (failure() || cancelled()) && inputs.slack_thread_ts
+        uses: slackapi/slack-github-action@v3
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            thread_ts: "${{ inputs.slack_thread_ts }}"
+            text: ":x: Auto-fix workflow failed for `${{ inputs.packages }}` in `${{ inputs.target_repo }}`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
+            unfurl_links: false
+            unfurl_media: false
+
+      - name: Comment on Linear ticket (failure)
+        if: (failure() || cancelled()) && inputs.linear_ticket
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          ISSUE_ID=$(curl -s https://api.linear.app/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $LINEAR_API_KEY" \
+            -d '{"query":"{ issueSearch(filter:{identifier:{eq:\"${{ inputs.linear_ticket }}\"}}) { nodes { id } } }"}' \
+            | jq -r '.data.issueSearch.nodes[0].id // empty')
+
+          if [ -n "$ISSUE_ID" ]; then
+            curl -s https://api.linear.app/graphql \
+              -H "Content-Type: application/json" \
+              -H "Authorization: $LINEAR_API_KEY" \
+              -d "{\"query\":\"mutation { commentCreate(input: { issueId: \\\"$ISSUE_ID\\\", body: \\\"Auto-fix workflow failed for **${{ inputs.target_repo }}** — [view run]($RUN_URL)\\\" }) { success } }\"}"
+          fi
