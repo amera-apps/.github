@@ -243,7 +243,7 @@ jobs:
         continue-on-error: true
         run: |
           pip install pip-audit
-          pip-audit --no-require-hashes --progress-spinner off
+          pip-audit --progress-spinner off
 
       # Opens a PR (or updates the existing one if the fix/$GHSA branch
       # already exists). create-pull-request handles branch creation,
