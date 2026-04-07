@@ -129,6 +129,13 @@ jobs:
             https://amera-artifacts-371568547021.d.codeartifact.us-east-1.amazonaws.com/pypi/amera-python/simple/
           poetry config http-basic.codeartifact aws "${{ steps.ca.outputs.token }}"
 
+      # Sync the lockfile with pyproject.toml without upgrading any packages.
+      # Target repos may have pyproject.toml changes that haven't been locked yet;
+      # --no-update keeps existing versions pinned so only the targeted
+      # `poetry update $PACKAGES` step changes dependency versions.
+      - name: Sync lockfile
+        run: poetry lock --no-update --no-interaction
+
       - name: Install dependencies
         run: poetry install --no-interaction
 
