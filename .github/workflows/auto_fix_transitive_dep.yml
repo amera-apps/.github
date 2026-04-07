@@ -409,6 +409,16 @@ jobs:
         with:
           node-version: ${{ steps.node-meta.outputs.version }}
 
+      # Authenticate to GitHub Packages for @amera-apps scoped packages.
+      # Uses the app token (not GITHUB_TOKEN) since this runs against a
+      # different repo than the workflow's own.
+      - name: Configure npm for private packages
+        run: |
+          echo "registry=https://registry.npmjs.org/" > .npmrc
+          echo "@amera-apps:registry=https://npm.pkg.github.com/" >> .npmrc
+          echo "//npm.pkg.github.com/:_authToken=${{ steps.app-token.outputs.token }}" >> .npmrc
+          echo "always-auth=true" >> .npmrc
+
       # Same snapshot-update-diff pattern as the Python job.
       # Uses `npm list --json` to read versions before/after since npm
       # doesn't have a `poetry show`-style command for single packages.
@@ -457,6 +467,11 @@ jobs:
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
           fi
+
+      # Remove the .npmrc we created for private package auth so it
+      # doesn't get committed into the PR by create-pull-request.
+      - name: Clean up .npmrc
+        run: git checkout -- .npmrc 2>/dev/null || rm -f .npmrc
 
       # Best-effort audit — same rationale as pip-audit above.
       - name: Verify fix with npm audit
