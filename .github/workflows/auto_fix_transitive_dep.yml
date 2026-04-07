@@ -65,24 +65,35 @@ jobs:
           repository: amera-apps/${{ inputs.target_repo }}
           token: ${{ steps.app-token.outputs.token }}
 
+      - name: Detect project requirements
+        id: project-meta
+        run: |
+          python3 -c "
+          import tomllib, pathlib, re, os
+          data = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
+
+          py = (
+              data.get('project', {}).get('requires-python', '')
+              or data.get('tool', {}).get('poetry', {}).get('dependencies', {}).get('python', '')
+          )
+          match = re.search(r'(\d+\.\d+)', py)
+          py_version = match.group(1) if match else '3.11'
+
+          poetry = data.get('tool', {}).get('poetry', {}).get('requires-poetry', '')
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'python-version={py_version}\n')
+              f.write(f'poetry-constraint={poetry}\n')
+          "
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-
-      - name: Detect required Poetry version
-        id: poetry-version
-        run: |
-          CONSTRAINT=$(python3 -c "
-          import tomllib, pathlib
-          data = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
-          print(data.get('tool', {}).get('poetry', {}).get('requires-poetry', ''))
-          " 2>/dev/null || echo "")
-          echo "constraint=$CONSTRAINT" >> "$GITHUB_OUTPUT"
+          python-version: ${{ steps.project-meta.outputs.python-version }}
 
       - name: Install Poetry
         run: |
-          CONSTRAINT="${{ steps.poetry-version.outputs.constraint }}"
+          CONSTRAINT="${{ steps.project-meta.outputs.poetry-constraint }}"
           if [ -n "$CONSTRAINT" ]; then
             if [[ "$CONSTRAINT" =~ ^[0-9] ]]; then
               CONSTRAINT="==${CONSTRAINT}"
@@ -215,10 +226,32 @@ jobs:
           repository: amera-apps/${{ inputs.target_repo }}
           token: ${{ steps.app-token.outputs.token }}
 
+      - name: Detect Node version
+        id: node-meta
+        run: |
+          NODE_VERSION="20"
+          if [ -f .nvmrc ]; then
+            NODE_VERSION=$(cat .nvmrc | tr -d '[:space:]')
+          elif [ -f .node-version ]; then
+            NODE_VERSION=$(cat .node-version | tr -d '[:space:]')
+          elif [ -f package.json ]; then
+            ENGINES=$(python3 -c "
+          import json, re
+          pkg = json.load(open('package.json'))
+          constraint = pkg.get('engines', {}).get('node', '')
+          match = re.search(r'(\d+)', constraint)
+          print(match.group(1) if match else '')
+          " 2>/dev/null || echo "")
+            if [ -n "$ENGINES" ]; then
+              NODE_VERSION="$ENGINES"
+            fi
+          fi
+          echo "version=$NODE_VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ steps.node-meta.outputs.version }}
 
       - name: Update vulnerable packages
         id: update
