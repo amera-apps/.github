@@ -53,8 +53,11 @@ on:
         description: 'Slack channel ID where the GHSA thread lives'
 
 # Minimal permissions — the app token provides write access to the target repo.
+# packages: read allows the GITHUB_TOKEN to pull @amera-apps npm packages
+# from GitHub Packages (the app token can't because it's repo-scoped).
 permissions:
   contents: read
+  packages: read
 
 # Prevent duplicate runs for the same repo + advisory. cancel-in-progress
 # is false so a queued run still executes (the alert may have changed).
@@ -410,14 +413,13 @@ jobs:
           node-version: ${{ steps.node-meta.outputs.version }}
 
       # Authenticate to GitHub Packages for @amera-apps scoped packages.
-      # Uses the app token (not GITHUB_TOKEN) since this runs against a
-      # different repo than the workflow's own.
+      # Uses GITHUB_TOKEN (not the app token) because the app token is
+      # repo-scoped and can't read packages from other repos in the org.
       - name: Configure npm for private packages
         run: |
           echo "registry=https://registry.npmjs.org/" > .npmrc
           echo "@amera-apps:registry=https://npm.pkg.github.com/" >> .npmrc
-          echo "//npm.pkg.github.com/:_authToken=${{ steps.app-token.outputs.token }}" >> .npmrc
-          echo "always-auth=true" >> .npmrc
+          echo "//npm.pkg.github.com/:_authToken=${{ github.token }}" >> .npmrc
 
       # Same snapshot-update-diff pattern as the Python job.
       # Uses `npm list --json` to read versions before/after since npm
