@@ -189,8 +189,9 @@ jobs:
 
             ${{ inputs.linear_ticket && format('Resolves {0}', inputs.linear_ticket) || '' }}
           labels: |
+            amerabot
+            dependencies
             security
-            automated-fix
 
       - name: Retarget to staging
         if: steps.create-pr.outputs.pull-request-number
