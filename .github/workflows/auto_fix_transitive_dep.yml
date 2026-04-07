@@ -125,8 +125,10 @@ jobs:
 
       - name: Authenticate Poetry
         run: |
-          poetry source add --priority=supplemental codeartifact \
-            https://amera-artifacts-371568547021.d.codeartifact.us-east-1.amazonaws.com/pypi/amera-python/simple/
+          if ! poetry source show codeartifact &>/dev/null; then
+            poetry source add --priority=supplemental codeartifact \
+              https://amera-artifacts-371568547021.d.codeartifact.us-east-1.amazonaws.com/pypi/amera-python/simple/
+          fi
           poetry config http-basic.codeartifact aws "${{ steps.ca.outputs.token }}"
 
       # Sync the lockfile with pyproject.toml without upgrading packages.
