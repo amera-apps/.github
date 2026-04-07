@@ -324,18 +324,33 @@ jobs:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "Looking up Linear issue ${{ inputs.linear_ticket }}..."
 
-          ISSUE_ID=$(curl -s https://api.linear.app/graphql \
+          RESPONSE=$(curl -s https://api.linear.app/graphql \
             -H "Content-Type: application/json" \
             -H "Authorization: $LINEAR_API_KEY" \
-            -d '{"query":"{ issueSearch(filter:{identifier:{eq:\"${{ inputs.linear_ticket }}\"}}) { nodes { id } } }"}' \
-            | jq -r '.data.issueSearch.nodes[0].id // empty')
+            -d '{"query":"{ issueSearch(filter:{identifier:{eq:\"${{ inputs.linear_ticket }}\"}}) { nodes { id } } }"}')
 
-          if [ -n "$ISSUE_ID" ]; then
-            curl -s https://api.linear.app/graphql \
-              -H "Content-Type: application/json" \
-              -H "Authorization: $LINEAR_API_KEY" \
-              -d "{\"query\":\"mutation { commentCreate(input: { issueId: \\\"$ISSUE_ID\\\", body: \\\"Auto-fix workflow failed for **${{ inputs.target_repo }}** — [view run]($RUN_URL)\\\" }) { success } }\"}"
+          ISSUE_ID=$(echo "$RESPONSE" | jq -r '.data.issueSearch.nodes[0].id // empty')
+
+          if [ -z "$ISSUE_ID" ]; then
+            echo "::warning::Could not resolve Linear issue ID for ${{ inputs.linear_ticket }}"
+            echo "API response: $RESPONSE"
+            exit 0
+          fi
+
+          echo "Resolved to internal ID: $ISSUE_ID — posting comment..."
+          COMMENT_RESPONSE=$(curl -s https://api.linear.app/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $LINEAR_API_KEY" \
+            -d "{\"query\":\"mutation { commentCreate(input: { issueId: \\\"$ISSUE_ID\\\", body: \\\"Auto-fix workflow failed for **${{ inputs.target_repo }}** — [view run]($RUN_URL)\\\" }) { success } }\"}")
+
+          SUCCESS=$(echo "$COMMENT_RESPONSE" | jq -r '.data.commentCreate.success // false')
+          if [ "$SUCCESS" = "true" ]; then
+            echo "Comment posted successfully"
+          else
+            echo "::warning::Failed to post comment on ${{ inputs.linear_ticket }}"
+            echo "API response: $COMMENT_RESPONSE"
           fi
 
   # ═══════════════════════════════════════════════════════════════════════
@@ -520,16 +535,31 @@ jobs:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "Looking up Linear issue ${{ inputs.linear_ticket }}..."
 
-          ISSUE_ID=$(curl -s https://api.linear.app/graphql \
+          RESPONSE=$(curl -s https://api.linear.app/graphql \
             -H "Content-Type: application/json" \
             -H "Authorization: $LINEAR_API_KEY" \
-            -d '{"query":"{ issueSearch(filter:{identifier:{eq:\"${{ inputs.linear_ticket }}\"}}) { nodes { id } } }"}' \
-            | jq -r '.data.issueSearch.nodes[0].id // empty')
+            -d '{"query":"{ issueSearch(filter:{identifier:{eq:\"${{ inputs.linear_ticket }}\"}}) { nodes { id } } }"}')
 
-          if [ -n "$ISSUE_ID" ]; then
-            curl -s https://api.linear.app/graphql \
-              -H "Content-Type: application/json" \
-              -H "Authorization: $LINEAR_API_KEY" \
-              -d "{\"query\":\"mutation { commentCreate(input: { issueId: \\\"$ISSUE_ID\\\", body: \\\"Auto-fix workflow failed for **${{ inputs.target_repo }}** — [view run]($RUN_URL)\\\" }) { success } }\"}"
+          ISSUE_ID=$(echo "$RESPONSE" | jq -r '.data.issueSearch.nodes[0].id // empty')
+
+          if [ -z "$ISSUE_ID" ]; then
+            echo "::warning::Could not resolve Linear issue ID for ${{ inputs.linear_ticket }}"
+            echo "API response: $RESPONSE"
+            exit 0
+          fi
+
+          echo "Resolved to internal ID: $ISSUE_ID — posting comment..."
+          COMMENT_RESPONSE=$(curl -s https://api.linear.app/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $LINEAR_API_KEY" \
+            -d "{\"query\":\"mutation { commentCreate(input: { issueId: \\\"$ISSUE_ID\\\", body: \\\"Auto-fix workflow failed for **${{ inputs.target_repo }}** — [view run]($RUN_URL)\\\" }) { success } }\"}")
+
+          SUCCESS=$(echo "$COMMENT_RESPONSE" | jq -r '.data.commentCreate.success // false')
+          if [ "$SUCCESS" = "true" ]; then
+            echo "Comment posted successfully"
+          else
+            echo "::warning::Failed to post comment on ${{ inputs.linear_ticket }}"
+            echo "API response: $COMMENT_RESPONSE"
           fi
