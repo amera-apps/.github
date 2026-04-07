@@ -70,8 +70,24 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Detect required Poetry version
+        id: poetry-version
+        run: |
+          CONSTRAINT=$(python3 -c "
+          import tomllib, pathlib
+          data = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
+          print(data.get('tool', {}).get('poetry', {}).get('requires-poetry', ''))
+          " 2>/dev/null || echo "")
+          echo "constraint=$CONSTRAINT" >> "$GITHUB_OUTPUT"
+
       - name: Install Poetry
-        run: pipx install poetry
+        run: |
+          CONSTRAINT="${{ steps.poetry-version.outputs.constraint }}"
+          if [ -n "$CONSTRAINT" ]; then
+            pipx install "poetry${CONSTRAINT}"
+          else
+            pipx install poetry
+          fi
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
