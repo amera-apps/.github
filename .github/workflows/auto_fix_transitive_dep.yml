@@ -87,7 +87,7 @@ jobs:
           "
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ steps.project-meta.outputs.python-version }}
 
@@ -188,7 +188,7 @@ jobs:
 
       - name: Create PR
         if: steps.update.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         id: create-pr
         with:
           token: ${{ steps.app-token.outputs.token }}
@@ -285,7 +285,7 @@ jobs:
           echo "version=$NODE_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ steps.node-meta.outputs.version }}
 
@@ -342,7 +342,7 @@ jobs:
 
       - name: Create PR
         if: steps.update.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         id: create-pr
         with:
           token: ${{ steps.app-token.outputs.token }}
@@ -371,8 +371,9 @@ jobs:
 
             ${{ inputs.linear_ticket && format('Resolves {0}', inputs.linear_ticket) || '' }}
           labels: |
+            amerabot
+            dependencies
             security
-            automated-fix
 
       - name: Retarget to staging
         if: steps.create-pr.outputs.pull-request-number
