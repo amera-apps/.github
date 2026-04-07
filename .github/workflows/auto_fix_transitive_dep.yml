@@ -53,11 +53,8 @@ on:
         description: 'Slack channel ID where the GHSA thread lives'
 
 # Minimal permissions — the app token provides write access to the target repo.
-# packages: read allows the GITHUB_TOKEN to pull @amera-apps npm packages
-# from GitHub Packages (the app token can't because it's repo-scoped).
 permissions:
   contents: read
-  packages: read
 
 # Prevent duplicate runs for the same repo + advisory. cancel-in-progress
 # is false so a queued run still executes (the alert may have changed).
@@ -365,7 +362,7 @@ jobs:
     if: inputs.ecosystem == 'npm'
     runs-on: ubuntu-latest
     steps:
-      # Same scoped app token pattern as the Python job.
+      # Scoped app token for repo operations (checkout, PR creation).
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -374,6 +371,17 @@ jobs:
           private-key: ${{ secrets.AMERABOT_APP_PRIVATE_KEY }}
           owner: amera-apps
           repositories: ${{ inputs.target_repo }}
+
+      # Org-wide app token for reading @amera-apps npm packages from
+      # GitHub Packages. The repo-scoped token above can't read packages
+      # published by other repos in the org.
+      - name: Generate package read token
+        id: pkg-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.AMERABOT_APP_ID }}
+          private-key: ${{ secrets.AMERABOT_APP_PRIVATE_KEY }}
+          owner: amera-apps
 
       - name: Checkout target repo
         uses: actions/checkout@v5
@@ -413,13 +421,12 @@ jobs:
           node-version: ${{ steps.node-meta.outputs.version }}
 
       # Authenticate to GitHub Packages for @amera-apps scoped packages.
-      # Uses GITHUB_TOKEN (not the app token) because the app token is
-      # repo-scoped and can't read packages from other repos in the org.
+      # Uses the org-wide pkg-token (not the repo-scoped app-token).
       - name: Configure npm for private packages
         run: |
           echo "registry=https://registry.npmjs.org/" > .npmrc
           echo "@amera-apps:registry=https://npm.pkg.github.com/" >> .npmrc
-          echo "//npm.pkg.github.com/:_authToken=${{ github.token }}" >> .npmrc
+          echo "//npm.pkg.github.com/:_authToken=${{ steps.pkg-token.outputs.token }}" >> .npmrc
 
       # Same snapshot-update-diff pattern as the Python job.
       # Uses `npm list --json` to read versions before/after since npm
