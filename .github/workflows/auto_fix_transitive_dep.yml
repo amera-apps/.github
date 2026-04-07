@@ -446,18 +446,10 @@ jobs:
         run: |
           declare -A BEFORE_VERS
           for pkg in $PACKAGES; do
-            ver=$(npm list "$pkg" --all --json 2>/dev/null | python3 -c "
-          import json, sys
-          def find(node, name):
-              deps = node.get('dependencies', {})
-              if name in deps:
-                  return deps[name].get('version', '')
-              for child in deps.values():
-                  v = find(child, name)
-                  if v:
-                      return v
-              return ''
-          print(find(json.load(sys.stdin), '$pkg') or 'not-installed')
+            ver=$(python3 -c "
+          import json
+          lock = json.load(open('package-lock.json'))
+          print(lock.get('packages', {}).get('node_modules/$pkg', {}).get('version', 'not-installed'))
           " 2>/dev/null) || ver="not-installed"
             BEFORE_VERS["$pkg"]="$ver"
           done
@@ -474,18 +466,10 @@ jobs:
             SUMMARY_PARTS=""
             for pkg in "${!BEFORE_VERS[@]}"; do
               old_ver="${BEFORE_VERS[$pkg]}"
-              new_ver=$(npm list "$pkg" --all --json 2>/dev/null | python3 -c "
-          import json, sys
-          def find(node, name):
-              deps = node.get('dependencies', {})
-              if name in deps:
-                  return deps[name].get('version', '')
-              for child in deps.values():
-                  v = find(child, name)
-                  if v:
-                      return v
-              return ''
-          print(find(json.load(sys.stdin), '$pkg') or 'unknown')
+              new_ver=$(python3 -c "
+          import json
+          lock = json.load(open('package-lock.json'))
+          print(lock.get('packages', {}).get('node_modules/$pkg', {}).get('version', 'unknown'))
           " 2>/dev/null) || new_ver="unknown"
               CHANGES="$CHANGES| \`$pkg\` | $old_ver | $new_ver |"$'\n'
               if [ -n "$SUMMARY_PARTS" ]; then SUMMARY_PARTS="$SUMMARY_PARTS, "; fi
