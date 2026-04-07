@@ -84,6 +84,9 @@ jobs:
         run: |
           CONSTRAINT="${{ steps.poetry-version.outputs.constraint }}"
           if [ -n "$CONSTRAINT" ]; then
+            if [[ "$CONSTRAINT" =~ ^[0-9] ]]; then
+              CONSTRAINT="==${CONSTRAINT}"
+            fi
             pipx install "poetry${CONSTRAINT}"
           else
             pipx install poetry
