@@ -289,23 +289,6 @@ jobs:
             dependencies
             security
 
-      # Many repos use a staging branch as the merge target instead of main.
-      # If staging exists, retarget the PR so it merges there. Fails silently
-      # if staging doesn't exist (the PR stays targeted at the default branch).
-      - name: Retarget to staging
-        if: steps.create-pr.outputs.pull-request-number
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TARGET_REPO: ${{ inputs.target_repo }}
-        run: |
-          if gh api "repos/amera-apps/$TARGET_REPO/branches/staging" --silent 2>/dev/null; then
-            gh pr edit ${{ steps.create-pr.outputs.pull-request-number }} \
-              --repo "amera-apps/$TARGET_REPO" \
-              --base staging
-            echo "Retargeted PR to staging"
-          fi
-
       # ── Failure / cancellation notifications ──────────────────────────
       # These steps only run when a previous step failed or the run was
       # cancelled. They post updates to the existing Slack thread and
@@ -532,21 +515,6 @@ jobs:
             dependencies
             security
 
-      # Same staging retarget logic as the Python job.
-      - name: Retarget to staging
-        if: steps.create-pr.outputs.pull-request-number
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TARGET_REPO: ${{ inputs.target_repo }}
-        run: |
-          if gh api "repos/amera-apps/$TARGET_REPO/branches/staging" --silent 2>/dev/null; then
-            gh pr edit ${{ steps.create-pr.outputs.pull-request-number }} \
-              --repo "amera-apps/$TARGET_REPO" \
-              --base staging
-            echo "Retargeted PR to staging"
-          fi
-
       # ── Failure / cancellation notifications ──────────────────────────
 
       - name: Notify Slack (failure)
@@ -772,20 +740,6 @@ jobs:
             amerabot
             dependencies
             security
-
-      - name: Retarget to staging
-        if: steps.create-pr.outputs.pull-request-number
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TARGET_REPO: ${{ inputs.target_repo }}
-        run: |
-          if gh api "repos/amera-apps/$TARGET_REPO/branches/staging" --silent 2>/dev/null; then
-            gh pr edit ${{ steps.create-pr.outputs.pull-request-number }} \
-              --repo "amera-apps/$TARGET_REPO" \
-              --base staging
-            echo "Retargeted PR to staging"
-          fi
 
       # ── Failure / cancellation notifications ──────────────────────────
 
