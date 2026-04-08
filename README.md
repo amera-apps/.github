@@ -199,13 +199,13 @@ If repos already have open sync PRs from a previous run, the workflow pushes an 
 
 [`.github/workflows/auto_fix_transitive_dep.yml`](.github/workflows/auto_fix_transitive_dep.yml)
 
-When the [amera-dependabot Lambda](https://github.com/amera-apps/infra/tree/main/aws/lambda/amera-dependabot) classifies a Dependabot alert as `fixable_manual` (a transitive dependency vulnerability that Dependabot can't fix on its own), it dispatches this workflow via `workflow_dispatch`. The workflow checks out the target repo, runs `poetry update` (pip) or `npm update` (npm) for the vulnerable package, verifies the fix with `pip-audit` / `npm audit`, and opens a PR with security metadata. If the target repo has a `staging` branch, the PR is retargeted to it.
+When the [amera-dependabot Lambda](https://github.com/amera-apps/infra/tree/main/aws/lambda/amera-dependabot) classifies a Dependabot alert as `fixable_manual` (a transitive dependency vulnerability that Dependabot can't fix on its own), it dispatches this workflow via `workflow_dispatch`. The workflow checks out the target repo, runs `poetry update` (pip), `npm update` (npm), or `bun update` (bun) for the vulnerable package, verifies the fix with `pip-audit` / `npm audit`, and opens a PR with security metadata. If the target repo has a `staging` branch, the PR is retargeted to it.
 
 ```mermaid
 graph LR
     Lambda["amera-dependabot\nLambda"] -->|"workflow_dispatch"| WF["auto_fix_transitive_dep"]
     WF -->|"checkout + update"| Repo["Target Repo"]
-    Repo -->|"poetry.lock / package-lock.json"| Audit["Verify fix"]
+    Repo -->|"poetry.lock / package-lock.json / bun.lock"| Audit["Verify fix"]
     Audit --> PR["Open PR\n(fix/GHSA-xxx)"]
     PR -->|"retarget if exists"| Staging["staging branch"]
 ```
@@ -216,7 +216,7 @@ graph LR
 |-------|----------|-------------|
 | `target_repo` | Yes | Repo name (short, not full_name) to fix |
 | `packages` | Yes | Space-separated package names to update |
-| `ecosystem` | Yes | Package ecosystem (`pip` or `npm`) |
+| `ecosystem` | Yes | Package ecosystem (`pip`, `npm`, or `bun`) |
 | `ghsa_ids` | Yes | GHSA ID(s) for branch name and PR metadata |
 | `severity` | Yes | Alert severity (`critical`, `high`, `medium`, `low`) |
 | `linear_ticket` | No | Linear ticket identifier (e.g. `AMR-123`) |

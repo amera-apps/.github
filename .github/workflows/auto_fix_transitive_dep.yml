@@ -26,7 +26,7 @@ on:
       ecosystem:
         required: true
         type: string
-        description: 'Package ecosystem (pip, npm)'
+        description: 'Package ecosystem (pip, npm, bun)'
       ghsa_ids:
         required: true
         type: string
@@ -533,6 +533,246 @@ jobs:
             security
 
       # Same staging retarget logic as the Python job.
+      - name: Retarget to staging
+        if: steps.create-pr.outputs.pull-request-number
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+        run: |
+          if gh api "repos/amera-apps/$TARGET_REPO/branches/staging" --silent 2>/dev/null; then
+            gh pr edit ${{ steps.create-pr.outputs.pull-request-number }} \
+              --repo "amera-apps/$TARGET_REPO" \
+              --base staging
+            echo "Retargeted PR to staging"
+          fi
+
+      # ── Failure / cancellation notifications ──────────────────────────
+
+      - name: Notify Slack (failure)
+        if: (failure() || cancelled()) && inputs.slack_thread_ts
+        uses: slackapi/slack-github-action@v3
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            thread_ts: "${{ inputs.slack_thread_ts }}"
+            text: ":x: Auto-fix workflow failed for `${{ inputs.packages }}` in `${{ inputs.target_repo }}`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
+            unfurl_links: false
+            unfurl_media: false
+
+      - name: Comment on Linear ticket (failure)
+        if: (failure() || cancelled()) && inputs.linear_ticket
+        env:
+          LINEAR_OAUTH_CLIENT_ID: ${{ secrets.LINEAR_AMERABOT_OAUTH_CLIENT_ID }}
+          LINEAR_OAUTH_CLIENT_SECRET: ${{ secrets.LINEAR_AMERABOT_OAUTH_CLIENT_SECRET }}
+        run: |
+          TOKEN_RESPONSE=$(curl -s -X POST https://api.linear.app/oauth/token \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=client_credentials&client_id=$LINEAR_OAUTH_CLIENT_ID&client_secret=$LINEAR_OAUTH_CLIENT_SECRET&scope=read,write,issues:create")
+          LINEAR_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token // empty')
+          if [ -z "$LINEAR_TOKEN" ]; then
+            echo "::warning::Failed to fetch Linear OAuth token"
+            echo "Response: $TOKEN_RESPONSE"
+            exit 0
+          fi
+          echo "::add-mask::$LINEAR_TOKEN"
+
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "Looking up Linear issue ${{ inputs.linear_ticket }}..."
+
+          RESPONSE=$(curl -s https://api.linear.app/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $LINEAR_TOKEN" \
+            -d '{"query":"{ issue(id:\"${{ inputs.linear_ticket }}\") { id } }"}')
+
+          ISSUE_ID=$(echo "$RESPONSE" | jq -r '.data.issue.id // empty')
+
+          if [ -z "$ISSUE_ID" ]; then
+            echo "::warning::Could not resolve Linear issue ID for ${{ inputs.linear_ticket }}"
+            echo "API response: $RESPONSE"
+            exit 0
+          fi
+
+          echo "Resolved to internal ID: $ISSUE_ID — posting comment..."
+          COMMENT_RESPONSE=$(curl -s https://api.linear.app/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $LINEAR_TOKEN" \
+            -d "{\"query\":\"mutation { commentCreate(input: { issueId: \\\"$ISSUE_ID\\\", body: \\\"Auto-fix workflow failed for **${{ inputs.target_repo }}** — [view run]($RUN_URL)\\\" }) { success } }\"}")
+
+          SUCCESS=$(echo "$COMMENT_RESPONSE" | jq -r '.data.commentCreate.success // false')
+          if [ "$SUCCESS" = "true" ]; then
+            echo "Comment posted successfully"
+          else
+            echo "::warning::Failed to post comment on ${{ inputs.linear_ticket }}"
+            echo "API response: $COMMENT_RESPONSE"
+          fi
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Bun job — mirrors the npm job structure but uses Bun tooling.
+  # Only supports text-based bun.lock (default since Bun v1.2). Repos
+  # still using the binary bun.lockb must migrate before this workflow
+  # can fix them.
+  # ═══════════════════════════════════════════════════════════════════════
+  fix-bun:
+    if: inputs.ecosystem == 'bun'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.AMERABOT_APP_ID }}
+          private-key: ${{ secrets.AMERABOT_APP_PRIVATE_KEY }}
+          owner: amera-apps
+          repositories: ${{ inputs.target_repo }}
+
+      - name: Checkout target repo
+        uses: actions/checkout@v5
+        with:
+          repository: amera-apps/${{ inputs.target_repo }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      # Reads the Bun version from package.json's "packageManager" field
+      # (e.g. "bun@1.1.38"). Falls back to "latest" if not specified.
+      - name: Detect Bun version
+        id: bun-meta
+        run: |
+          BUN_VERSION="latest"
+          if [ -f package.json ]; then
+            DETECTED=$(python3 -c "
+          import json, re
+          pkg = json.load(open('package.json'))
+          pm = pkg.get('packageManager', '')
+          match = re.match(r'bun@(.+)', pm)
+          print(match.group(1) if match else '')
+          " 2>/dev/null || echo "")
+            if [ -n "$DETECTED" ]; then
+              BUN_VERSION="$DETECTED"
+            fi
+          fi
+          echo "version=$BUN_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.bun-meta.outputs.version }}
+
+      # Bun respects .npmrc for scoped registries, same pattern as the
+      # npm job. Uses GITHUB_TOKEN for @amera-apps packages on GitHub Packages.
+      - name: Configure registry for private packages
+        run: |
+          echo "registry=https://registry.npmjs.org/" > .npmrc
+          echo "@amera-apps:registry=https://npm.pkg.github.com/" >> .npmrc
+          echo "//npm.pkg.github.com/:_authToken=${{ github.token }}" >> .npmrc
+
+      # Same snapshot-update-diff pattern as the npm job. Parses the
+      # text-based bun.lock (JSONC with trailing commas) to extract
+      # versions before and after the update.
+      #
+      # bun.lock packages format: "pkg": ["pkg@version", ...]
+      # Scoped packages use rsplit('@', 1) to avoid splitting on @org/.
+      - name: Update vulnerable packages
+        id: update
+        env:
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          parse_bun_lock_version() {
+            local lockfile="$1" pkg="$2"
+            python3 -c "
+          import json, re, pathlib
+          raw = pathlib.Path('$lockfile').read_text()
+          clean = re.sub(r',(\s*[\]\}])', r'\1', raw)
+          lock = json.loads(clean)
+          entry = lock.get('packages', {}).get('$pkg', [])
+          ver = entry[0].rsplit('@', 1)[-1] if entry else 'not-installed'
+          print(ver)
+          " 2>/dev/null || echo "not-installed"
+          }
+
+          declare -A BEFORE_VERS
+          for pkg in $PACKAGES; do
+            ver=$(parse_bun_lock_version "bun.lock" "$pkg")
+            BEFORE_VERS["$pkg"]="$ver"
+          done
+
+          echo "::group::bun update output"
+          bun update $PACKAGES 2>&1 | tee /tmp/update_output.txt
+          echo "::endgroup::"
+
+          if git diff --quiet bun.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No lockfile changes — package may already be up to date"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+
+            CHANGES=""
+            SUMMARY_PARTS=""
+            for pkg in "${!BEFORE_VERS[@]}"; do
+              old_ver="${BEFORE_VERS[$pkg]}"
+              new_ver=$(parse_bun_lock_version "bun.lock" "$pkg")
+              CHANGES="$CHANGES| \`$pkg\` | $old_ver | $new_ver |"$'\n'
+              if [ -n "$SUMMARY_PARTS" ]; then SUMMARY_PARTS="$SUMMARY_PARTS, "; fi
+              SUMMARY_PARTS="$SUMMARY_PARTS$pkg [$old_ver → $new_ver]"
+            done
+
+            echo "version_summary=$SUMMARY_PARTS" >> "$GITHUB_OUTPUT"
+            {
+              echo "version_table<<EOF"
+              echo "| Package | Before | After |"
+              echo "|---------|--------|-------|"
+              echo -n "$CHANGES"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Clean up .npmrc
+        run: git checkout -- .npmrc 2>/dev/null || rm -f .npmrc
+
+      # Bun does not ship a built-in audit command. Best-effort scan
+      # using npm audit — Bun's node_modules layout is npm-compatible.
+      - name: Verify fix with npm audit
+        if: steps.update.outputs.changed == 'true'
+        continue-on-error: true
+        run: |
+          npx -y npm@latest audit || true
+
+      - name: Create PR
+        if: steps.update.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        id: create-pr
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: fix/${{ inputs.ghsa_ids }}
+          commit-message: 'fix: update ${{ steps.update.outputs.version_summary }} (${{ inputs.ghsa_ids }})'
+          title: 'fix: update ${{ steps.update.outputs.version_summary }} (${{ inputs.ghsa_ids }})'
+          body: |
+            ## Summary
+
+            Automated fix for a **${{ inputs.severity }}**-severity transitive dependency vulnerability.
+
+            Updates `${{ inputs.packages }}` to resolve [${{ inputs.ghsa_ids }}](https://github.com/advisories/${{ inputs.ghsa_ids }}).
+
+            ### Version changes
+
+            ${{ steps.update.outputs.version_table }}
+
+            **Opened by:** [amera-dependabot](https://github.com/amera-apps/infra/tree/main/aws/lambda/amera-dependabot) via [auto-fix workflow](https://github.com/amera-apps/.github/blob/main/.github/workflows/auto_fix_transitive_dep.yml)
+            ${{ inputs.alert_url && format('**Alert:** {0}', inputs.alert_url) || '' }}
+
+            ### What to do
+
+            1. Review the lockfile changes
+            2. Confirm CI passes
+            3. Merge when ready
+
+            ${{ inputs.linear_ticket && format('Resolves {0}', inputs.linear_ticket) || '' }}
+          labels: |
+            amerabot
+            dependencies
+            security
+
       - name: Retarget to staging
         if: steps.create-pr.outputs.pull-request-number
         continue-on-error: true
