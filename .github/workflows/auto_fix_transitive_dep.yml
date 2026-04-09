@@ -98,7 +98,7 @@ jobs:
       # system Python (3.12 on ubuntu-24.04) which has tomllib built in.
       # Outputs:
       #   python-version  — major.minor extracted from requires-python or
-      #                      tool.poetry.dependencies.python (fallback: 3.11)
+      #                      tool.poetry.dependencies.python (fallback: 3.13.6)
       #   poetry-constraint — raw requires-poetry value for pipx install
       - name: Detect project requirements
         id: project-meta
@@ -112,7 +112,7 @@ jobs:
               or data.get('tool', {}).get('poetry', {}).get('dependencies', {}).get('python', '')
           )
           match = re.search(r'(\d+\.\d+)', py)
-          py_version = match.group(1) if match else '3.11'
+          py_version = match.group(1) if match else '3.13.6'
 
           poetry = data.get('tool', {}).get('poetry', {}).get('requires-poetry', '')
 
