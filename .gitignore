@@ -3,7 +3,16 @@
 Thumbs.db
 
 # Dev tooling
-.cursor
+.agents
 .claude
-claude/*
-.worktrees/
+.cursor
+.codex
+.conductor
+.context
+.windsurf
+.continue
+.zed
+.worktrees
+.aider*
+CLAUDE.local.md
+.mcp.json
